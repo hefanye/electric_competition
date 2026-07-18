@@ -128,7 +128,7 @@ void Screen_SendResult(const char *page, const char *title,
                        const char *items[], uint8_t count)
 {
     Screen_SwitchPage(page);  HAL_Delay(600);
-    Screen_SendText("tsta", title);   HAL_Delay(200);
+    Screen_SendText("ttitle", title); HAL_Delay(200);
 
     for (uint8_t i = 0; i < count && i < 6; i++) {
         char ctrl[4] = {'t', (char)('0' + i), '\0'};
@@ -186,7 +186,7 @@ done:
     /* 校准 */
     if (strcmp(p0, "CAL") == 0 && strcmp(p1, "START") == 0) {
         const char *items[] = { p2, p3 };
-        Screen_SendResult("result", "校准完成", items, 2);
+        Screen_SendResult("result", "CAL_DONE", items, 2);
         return;
     }
 
@@ -197,20 +197,20 @@ done:
 
         if (strcmp(p1, "FULL") == 0) {
             HAL_Delay(200);
-            const char *items[] = { "线序:正常", "线缆:SFTP",
-                                    "R1=12.3Ω R2=12.5Ω",
-                                    "R3=12.4Ω R4=12.6Ω", "衰减=-3.2dB" };
-            Screen_SendResult("result", "完整双端检测", items, 5);
+            const char *items[] = { "WIREMAP:OK", "SHIELD:SFTP",
+                                    "R1=12.3R R2=12.5R",
+                                    "R3=12.4R R4=12.6R", "LOSS=-3.2dB" };
+            Screen_SendResult("result", "DUAL_FULL", items, 5);
         }
-        if (strcmp(p1, "WIREMAP") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "线序检测"); }
-        if (strcmp(p1, "SHIELD")  == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "线缆类型:SFTP"); }
+        if (strcmp(p1, "WIREMAP") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("ttitle", "WIREMAP"); }
+        if (strcmp(p1, "SHIELD")  == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("ttitle", "SHIELD:SFTP"); }
         if (strcmp(p1, "RES") == 0) {
             HAL_Delay(100);
-            const char *items[] = { "1对=12.3Ω", "2对=12.5Ω",
-                                    "3对=12.4Ω", "4对=12.6Ω" };
-            Screen_SendResult("result", "直流电阻检测", items, 4);
+            const char *items[] = { "PAIR1=12.3R", "PAIR2=12.5R",
+                                    "PAIR3=12.4R", "PAIR4=12.6R" };
+            Screen_SendResult("result", "RESISTANCE", items, 4);
         }
-        if (strcmp(p1, "LOSS") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "30MHz衰减检测"); HAL_Delay(200); Screen_SendText("t0", "衰减=-3.2dB"); }
+        if (strcmp(p1, "LOSS") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("ttitle", "ATTENUATION"); HAL_Delay(200); Screen_SendText("t0", "LOSS=-3.2dB"); }
         return;
     }
 
@@ -221,15 +221,15 @@ done:
 
         if (strcmp(p1, "FULL") == 0) {
             HAL_Delay(100);
-            const char *items[] = { "长度=105m", "短路:无短路" };
-            Screen_SendResult("result", "完整单端检测", items, 2);
+            const char *items[] = { "LENGTH=105m", "SHORT:NO_SHORT" };
+            Screen_SendResult("result", "SINGLE_FULL", items, 2);
         }
-        if (strcmp(p1, "LEN")   == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "长度检测"); HAL_Delay(200); Screen_SendText("t0", "长度=105m"); }
-        if (strcmp(p1, "SHORT") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "无短路"); }
+        if (strcmp(p1, "LEN")   == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("ttitle", "LENGTH"); HAL_Delay(200); Screen_SendText("t0", "LENGTH=105m"); }
+        if (strcmp(p1, "SHORT") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("ttitle", "NO_SHORT"); }
         if (strcmp(p1, "LOC") == 0) {
             HAL_Delay(100);
-            const char *items[] = { "短路@2对", "距离=32.5m" };
-            Screen_SendResult("result", "短路位置检测", items, 2);
+            const char *items[] = { "SHORT@PAIR2", "DIST=32.5m" };
+            Screen_SendResult("result", "SHORT_LOC", items, 2);
         }
         return;
     }
