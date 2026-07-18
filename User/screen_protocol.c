@@ -129,7 +129,6 @@ void Screen_SendResult(const char *page, const char *title,
 {
     Screen_SwitchPage(page);  HAL_Delay(600);
     Screen_SendText("tsta", title);   HAL_Delay(200);
-    Screen_SendText("ttitle", title); HAL_Delay(200);
 
     for (uint8_t i = 0; i < count && i < 6; i++) {
         char ctrl[4] = {'t', (char)('0' + i), '\0'};
@@ -203,15 +202,15 @@ done:
                                     "R3=12.4Ω R4=12.6Ω", "衰减=-3.2dB" };
             Screen_SendResult("result", "完整双端检测", items, 5);
         }
-        if (strcmp(p1, "WIREMAP") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "线序检测"); HAL_Delay(200); Screen_SendText("ttitle", "线序检测"); }
-        if (strcmp(p1, "SHIELD")  == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "线缆类型"); HAL_Delay(200); Screen_SendText("ttitle", "线缆类型:SFTP"); }
+        if (strcmp(p1, "WIREMAP") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "线序检测"); }
+        if (strcmp(p1, "SHIELD")  == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "线缆类型:SFTP"); }
         if (strcmp(p1, "RES") == 0) {
             HAL_Delay(100);
             const char *items[] = { "1对=12.3Ω", "2对=12.5Ω",
                                     "3对=12.4Ω", "4对=12.6Ω" };
             Screen_SendResult("result", "直流电阻检测", items, 4);
         }
-        if (strcmp(p1, "LOSS") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "30MHz衰减检测"); HAL_Delay(200); Screen_SendText("ttitle", "30MHz衰减检测"); HAL_Delay(200); Screen_SendText("t0", "衰减=-3.2dB"); }
+        if (strcmp(p1, "LOSS") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "30MHz衰减检测"); HAL_Delay(200); Screen_SendText("t0", "衰减=-3.2dB"); }
         return;
     }
 
@@ -225,8 +224,8 @@ done:
             const char *items[] = { "长度=105m", "短路:无短路" };
             Screen_SendResult("result", "完整单端检测", items, 2);
         }
-        if (strcmp(p1, "LEN")   == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "长度检测"); HAL_Delay(200); Screen_SendText("ttitle", "长度检测"); HAL_Delay(200); Screen_SendText("t0", "长度=105m"); }
-        if (strcmp(p1, "SHORT") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "无短路"); HAL_Delay(200); Screen_SendText("ttitle", "无短路"); }
+        if (strcmp(p1, "LEN")   == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "长度检测"); HAL_Delay(200); Screen_SendText("t0", "长度=105m"); }
+        if (strcmp(p1, "SHORT") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "无短路"); }
         if (strcmp(p1, "LOC") == 0) {
             HAL_Delay(100);
             const char *items[] = { "短路@2对", "距离=32.5m" };
