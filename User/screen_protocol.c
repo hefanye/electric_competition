@@ -129,7 +129,6 @@ void Screen_SendResult(const char *page, const char *title,
 {
     Screen_SwitchPage(page);  HAL_Delay(600);
     Screen_SendText("tsta", title);   HAL_Delay(200);
-    Screen_SendText("ttitle", title); HAL_Delay(200);
 
     for (uint8_t i = 0; i < count && i < 6; i++) {
         char ctrl[4] = {'t', (char)('0' + i), '\0'};
@@ -203,15 +202,15 @@ done:
                                     "R3=12.4R R4=12.6R", "LOSS=-3.2dB" };
             Screen_SendResult("result", "DUAL_FULL", items, 5);
         }
-        if (strcmp(p1, "WIREMAP") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "WIREMAP"); HAL_Delay(200); Screen_SendText("ttitle", "WIREMAP"); }
-        if (strcmp(p1, "SHIELD")  == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "SHIELD"); HAL_Delay(200); Screen_SendText("ttitle", "SHIELD:SFTP"); }
+        if (strcmp(p1, "WIREMAP") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "WIREMAP"); }
+        if (strcmp(p1, "SHIELD")  == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "SHIELD:SFTP"); }
         if (strcmp(p1, "RES") == 0) {
             HAL_Delay(100);
             const char *items[] = { "PAIR1=12.3R", "PAIR2=12.5R",
                                     "PAIR3=12.4R", "PAIR4=12.6R" };
             Screen_SendResult("result", "RESISTANCE", items, 4);
         }
-        if (strcmp(p1, "LOSS") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "LOSS"); HAL_Delay(200); Screen_SendText("ttitle", "ATTENUATION"); HAL_Delay(200); Screen_SendText("t0", "LOSS=-3.2dB"); }
+        if (strcmp(p1, "LOSS") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "ATTENUATION"); HAL_Delay(200); Screen_SendText("t0", "LOSS=-3.2dB"); }
         return;
     }
 
@@ -225,8 +224,8 @@ done:
             const char *items[] = { "LENGTH=105m", "SHORT:NO_SHORT" };
             Screen_SendResult("result", "SINGLE_FULL", items, 2);
         }
-        if (strcmp(p1, "LEN")   == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "LENGTH"); HAL_Delay(200); Screen_SendText("ttitle", "LENGTH"); HAL_Delay(200); Screen_SendText("t0", "LENGTH=105m"); }
-        if (strcmp(p1, "SHORT") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "NO_SHORT"); HAL_Delay(200); Screen_SendText("ttitle", "NO_SHORT"); }
+        if (strcmp(p1, "LEN")   == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "LENGTH"); HAL_Delay(200); Screen_SendText("t0", "LENGTH=105m"); }
+        if (strcmp(p1, "SHORT") == 0) { HAL_Delay(100); Screen_SwitchPage("result"); HAL_Delay(500); Screen_SendText("tsta", "NO_SHORT"); }
         if (strcmp(p1, "LOC") == 0) {
             HAL_Delay(100);
             const char *items[] = { "SHORT@PAIR2", "DIST=32.5m" };
