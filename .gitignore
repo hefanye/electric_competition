@@ -1,0 +1,10 @@
+# Keil build output
+MDK-ARM/**/Listings/
+MDK-ARM/**/Objects/
+MDK-ARM/**/*.dep
+MDK-ARM/**/*.htm
+MDK-ARM/**/*.build_log.htm
+MDK-ARM/**/*.map
+build.log
+*.o
+*.d
