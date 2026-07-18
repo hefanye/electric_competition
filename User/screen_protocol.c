@@ -93,7 +93,7 @@ void Screen_Init(void)
     HAL_Delay(5000);
 
     for (int i = 0; i < 3; i++) {
-        Screen_SendText("tsta", "就绪");
+        Screen_SendText("tsta", "READY");
         HAL_Delay(800);
     }
 }
@@ -174,15 +174,15 @@ done:
     /* 返回主页 */
     if (strcmp(p0, "HOME") == 0 && strcmp(p1, "BACK") == 0) {
         HAL_Delay(500);
-        Screen_SendText("tsta", "就绪");
+        Screen_SendText("tsta", "READY");
         return;
     }
 
     /* 导航到子页 */
-    if (strcmp(p0, "CAL")  == 0 && strcmp(p1, "OPEN")  == 0) { Screen_SendText("tsta", "校准模式");   return; }
-    if (strcmp(p0, "TEST") == 0 && strcmp(p1, "OPEN")  == 0) { Screen_SendText("tsta", "检测模式");  return; }
-    if (strcmp(p0, "TEST") == 0 && strcmp(p1, "DUAL")  == 0) { Screen_SendText("tsta", "双端检测");  return; }
-    if (strcmp(p0, "TEST") == 0 && strcmp(p1, "SINGLE")== 0) { Screen_SendText("tsta", "单端检测");return; }
+    if (strcmp(p0, "CAL")  == 0 && strcmp(p1, "OPEN")  == 0) { Screen_SendText("tsta", "CAL_READY");   return; }
+    if (strcmp(p0, "TEST") == 0 && strcmp(p1, "OPEN")  == 0) { Screen_SendText("tsta", "TEST_READY");  return; }
+    if (strcmp(p0, "TEST") == 0 && strcmp(p1, "DUAL")  == 0) { Screen_SendText("tsta", "DUAL_READY");  return; }
+    if (strcmp(p0, "TEST") == 0 && strcmp(p1, "SINGLE")== 0) { Screen_SendText("tsta", "SINGLE_READY");return; }
 
     /* 校准 */
     if (strcmp(p0, "CAL") == 0 && strcmp(p1, "START") == 0) {
@@ -194,7 +194,7 @@ done:
     /* 双端测试 */
     if (strcmp(p0, "DUAL") == 0) {
         Screen_SwitchPage("run"); HAL_Delay(500);
-        Screen_SendText("tsta", "检测中");
+        Screen_SendText("tsta", "RUNNING");
 
         if (strcmp(p1, "FULL") == 0) {
             HAL_Delay(200);
@@ -218,7 +218,7 @@ done:
     /* 单端测试 */
     if (strcmp(p0, "SINGLE") == 0) {
         Screen_SwitchPage("run"); HAL_Delay(500);
-        Screen_SendText("tsta", "检测中");
+        Screen_SendText("tsta", "RUNNING");
 
         if (strcmp(p1, "FULL") == 0) {
             HAL_Delay(100);
