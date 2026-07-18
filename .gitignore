@@ -8,3 +8,6 @@ MDK-ARM/**/*.map
 build.log
 *.o
 *.d
+*.axf
+*.hex
+*.uvguix.*

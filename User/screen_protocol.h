@@ -12,6 +12,8 @@ void Screen_Init(void);
 void Screen_Process(void);
 void Screen_SendText(const char *ctrl_id, const char *text);
 void Screen_SwitchPage(const char *page_name);
+void Screen_SendResult(const char *page, const char *title,
+                       const char *items[], uint8_t count);
 void Screen_RxByteCallback(uint8_t byte);
 
 extern volatile uint8_t  g_cmd_received;
