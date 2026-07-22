@@ -1,5 +1,6 @@
 #include "screen_protocol.h"
 #include "usart.h"
+#include "dds_ui.h"
 
 /*===========================================================================
  * TX 中断队列
@@ -145,6 +146,9 @@ static void HandleToken(const char *buf)
     char p0[16], p1[16], p2[16], p3[16];
     uint8_t cnt = 0;
     const char *s = buf;
+
+    /* DDS 指令交由独立模块处理，其他原有业务逻辑完全保留。 */
+    if (DDS_UI_HandleScreenToken(buf)) return;
 
     p0[0] = p1[0] = p2[0] = p3[0] = '\0';
 

@@ -18,12 +18,17 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
+#include "dma.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "screen_protocol.h"
+#include "dds_at.h"
+#include "dds_ui.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,6 +38,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* 正式屏幕控制模式：DDS 仅响应串口屏命令，不在上电时自动输出。 */
+#define DDS_DEBUG_RUN_ON_BOOT  0U
 
 /* USER CODE END PD */
 
@@ -44,7 +51,6 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -87,9 +93,19 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_UART4_Init();
+  MX_ADC1_Init();
+  MX_TIM2_Init();
+  MX_UART5_Init();
   /* USER CODE BEGIN 2 */
   Screen_Init();
+  DDS_Init(&huart5);
+  DDS_UI_Init();
+
+#if DDS_DEBUG_RUN_ON_BOOT
+  (void)DDS_DebugPointTest();
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -97,6 +113,7 @@ int main(void)
   while (1)
   {
     Screen_Process();
+    DDS_UI_Process();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
