@@ -72,3 +72,12 @@
 - FSK 实际切换还需要按模块手册连接并驱动对应模式选择引脚；本工程负责设置 f0/f1 参数。
 - 本仓库不提交 `axf/hex/o/d` 等 Keil 构建产物，也不提交个人的 `uvoptx/uvguix` 设置。
 
+## Branches / 分支说明
+
+| Branch | Purpose |
+| --- | --- |
+| `master` | Repository overview and the stable STM32F407 DDS + serial-screen project baseline. |
+| `stm32f407-dds-screen` | STM32F407VGT6 project: Taobao/TJC serial screen controls the AD9959 AT-command DDS module. |
+| `stm32f407-ad9226-parallel` | STM32F407 AD9226 parallel-ADC reusable capture driver and the verified A-channel debug example. |
+
+Use the branch that matches the hardware task; do not mix generated build files between branches.
