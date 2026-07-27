@@ -17,6 +17,22 @@
 #define AD9226_FRAME_SAMPLES      (256U)
 #define AD9226_UART_TIMEOUT_MS    (100U)
 
+/*
+ * Optional source-path calibration.
+ *
+ * V_adc = V_source * NUM / DEN.  Keep both values at 1 when no calibrated
+ * source-path attenuation is known.  This is intentionally not a property of
+ * AD9226: it depends on the signal source, output impedance and analogue
+ * front-end.  pp_adc_mv is always the actual AD9226 input-side result.
+ */
+#ifndef AD9226_SOURCE_TO_ADC_NUM
+#define AD9226_SOURCE_TO_ADC_NUM  (1U)
+#endif
+
+#ifndef AD9226_SOURCE_TO_ADC_DEN
+#define AD9226_SOURCE_TO_ADC_DEN  (1U)
+#endif
+
 static TIM_HandleTypeDef *s_tim;
 static UART_HandleTypeDef *s_uart;
 
@@ -56,9 +72,25 @@ static void AD9226_Print(const char *text)
     }
 }
 
+/* TIM1 is on APB2.  If APB2 is prescaled, TIM1 receives PCLK2 x2. */
+static uint32_t AD9226_GetTim1ClockHz(void)
+{
+    uint32_t timer_clock_hz = HAL_RCC_GetPCLK2Freq();
+
+    if ((RCC->CFGR & RCC_CFGR_PPRE2) != 0U)
+    {
+        timer_clock_hz *= 2U;
+    }
+
+    return timer_clock_hz;
+}
+
 HAL_StatusTypeDef AD9226_Debug_Init(TIM_HandleTypeDef *htim,
                                     UART_HandleTypeDef *huart)
 {
+    uint32_t aclk_hz;
+    char startup[144];
+
     if ((htim == NULL) || (huart == NULL))
     {
         return HAL_ERROR;
@@ -82,9 +114,17 @@ HAL_StatusTypeDef AD9226_Debug_Init(TIM_HandleTypeDef *htim,
         return HAL_ERROR;
     }
 
-    AD9226_Print("\r\n=== AD9226 A-channel debug ===\r\n"
-                 "ACLK=10 kHz, data=PE0..PE11, AD0=MSB\r\n"
-                 "Tie A input to 0 V first: mean should be near 2048.\r\n");
+    aclk_hz = AD9226_GetTim1ClockHz() /
+              ((s_tim->Init.Prescaler + 1U) * (s_tim->Init.Period + 1U));
+    (void)snprintf(startup, sizeof(startup),
+                   "\r\n=== AD9226 A-channel debug ===\r\n"
+                   "ACLK=%lu Hz (PSC=%lu ARR=%lu CCR1=%lu), data=PE0..PE11, AD0=MSB\r\n"
+                   "Tie A input to 0 V first: mean should be near 2048.\r\n",
+                   (unsigned long)aclk_hz,
+                   (unsigned long)s_tim->Init.Prescaler,
+                   (unsigned long)s_tim->Init.Period,
+                   (unsigned long)__HAL_TIM_GET_COMPARE(s_tim, TIM_CHANNEL_1));
+    AD9226_Print(startup);
     return HAL_OK;
 }
 
@@ -119,7 +159,8 @@ void AD9226_Debug_Process(void)
     uint32_t mean_code;
     uint16_t pp_code;
     int32_t dc_est_mv;
-    uint32_t pp_est_mv;
+    uint32_t pp_adc_mv;
+    uint32_t pp_dds_equiv_mv;
     char report[160];
 
     if (s_frame_ready == 0U)
@@ -148,19 +189,23 @@ void AD9226_Debug_Process(void)
 
     /* 依据说明书的 -5 V~+5 V 输入量程做近似换算，仅作调试参考。 */
     dc_est_mv = ((int32_t)2048 - (int32_t)mean_code) * 5000 / 2048;
-    pp_est_mv = ((uint32_t)pp_code * 10000U + 2047U) / 4095U;
+    pp_adc_mv = ((uint32_t)pp_code * 5000U + 1024U) / 2048U;
+    pp_dds_equiv_mv = (pp_adc_mv * AD9226_SOURCE_TO_ADC_DEN +
+                        (AD9226_SOURCE_TO_ADC_NUM / 2U)) /
+                       AD9226_SOURCE_TO_ADC_NUM;
 
     ++s_frame_number;
     (void)snprintf(report, sizeof(report),
                    "AD9226 A: frame=%lu mean=%lu min=%u max=%u pp=%u "
-                   "dc_est=%ld mV pp_est=%lu mV\r\n",
+                   "dc_est=%ld mV pp_adc=%lu mV pp_dds_eq=%lu mV\r\n",
                    (unsigned long)s_frame_number,
                    (unsigned long)mean_code,
                    (unsigned int)min_code,
                    (unsigned int)max_code,
                    (unsigned int)pp_code,
                    (long)dc_est_mv,
-                   (unsigned long)pp_est_mv);
+                   (unsigned long)pp_adc_mv,
+                   (unsigned long)pp_dds_equiv_mv);
     AD9226_Print(report);
 
     __disable_irq();

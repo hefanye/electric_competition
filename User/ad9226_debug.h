@@ -6,7 +6,7 @@
  *   PA8 / TIM1_CH1 -> ACLK
  *   PE0~PE11       <- AD0~AD11（AD0 为最高位）
  *
- * 本模块用于 10 kSPS 首次硬件验证，不用于 65 MSPS 连续采集。
+ * 本模块用于低、中速硬件验证，不用于 65 MSPS 连续采集。
  */
 
 #ifndef AD9226_DEBUG_H
