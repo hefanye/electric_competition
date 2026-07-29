@@ -12,7 +12,7 @@
 #include <string.h>
 
 #define PC_UART_TIMEOUT_MS   500U
-#define WAVE_POINTS          200U
+#define WAVE_POINTS          255U
 
 static UART_HandleTypeDef *s_uart;
 
