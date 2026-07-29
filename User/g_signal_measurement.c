@@ -64,16 +64,6 @@ static uint8_t scale_to_u8(float value, float minimum, float maximum)
     return (uint8_t)(scaled + 0.5f);
 }
 
-static float sample_linear(float index)
-{
-    uint32_t i0 = (uint32_t)index % G_SIGNAL_FRAME_SAMPLES;
-    uint32_t i1 = (i0 + 1U) % G_SIGNAL_FRAME_SAMPLES;
-    float fraction = index - floorf(index);
-    float v0 = code_to_input_voltage(reverse12(s_raw[G_SIGNAL_DISCARD_SAMPLES + i0] & 0x0FFFU));
-    float v1 = code_to_input_voltage(reverse12(s_raw[G_SIGNAL_DISCARD_SAMPLES + i1] & 0x0FFFU));
-
-    return v0 + (v1 - v0) * fraction;
-}
 
 /* ===== 多正弦最小二乘拟合 =====
  * 模型 x[n] = d + Σ_k [ak·cos(ωk·n) + bk·sin(ωk·n)]，K≤3（基波+2谐波）
@@ -137,13 +127,15 @@ static uint8_t solve_linear_system(float *A, float *b, float *x, uint32_t n)
 /* 多正弦最小二乘拟合：返回基波峰峰值（mV），通过 fund_freq 返回精确基波频率。
  * 输入：raw ADC 码值缓冲（已含 DISCARD 偏移）、采样率、FFT 得到的初始频率估计。
  * 逐点累加法方程，避免构造 8192×7 大矩阵，省内存。
- * 内部直接从码值转换电压，无需额外 float 缓冲区（省 32KB SRAM）。 */
+ * 内部直接从码值转换电压，无需额外 float 缓冲区（省 32KB SRAM）。
+ * beta_out 输出 [d, a1, b1, a2, b2, a3, b3] 供波形重建使用。 */
 static float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
                                    float sample_rate, float freq_init,
                                    uint32_t peak_bin,
                                    float *fund_freq_out,
                                    float harmonics_freq[3],
-                                   float harmonics_amp[3])
+                                   float harmonics_amp[3],
+                                   float beta_out[FIT_MATRIX_DIM])
 {
     uint32_t n, k, row, col;
     float omega[FIT_MAX_HARMONICS];
@@ -224,93 +216,45 @@ static float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
         }
     }
     if (fund_freq_out) *fund_freq_out = freq[0];
+    /* 输出 beta 供波形重建使用 */
+    if (beta_out) {
+        for (k = 0U; k < FIT_MATRIX_DIM; ++k) {
+            beta_out[k] = beta[k];
+        }
+    }
     return fund_upp_mV;
 }
 
-static void build_wave(uint8_t *destination, uint8_t periods, float frequency_hz,
-                       uint32_t peak_bin)
+/* 正弦模型重建波形：用最小二乘拟合的参数直接生成数学级光滑波形。
+ * 模型 x(t) = d + Σ_k [ak·cos(2π·k·t) + bk·sin(2π·k·t)]，t 为归一化周期数。
+ * 优点：
+ *   1. 无 FFT 频谱泄漏/混叠问题，全频段（50k~500k）一致光滑
+ *   2. 无需 FFT+IFFT，计算量仅 255×6 次三角函数（<1ms）
+ *   3. 波形纯净，直接反映拟合参数，与 Upp 测量一致
+ *   4. 不依赖过零检测，无噪声误触发问题 */
+static void build_wave(uint8_t *destination, uint8_t periods,
+                       const float *beta, const float *freq,
+                       uint32_t harmonics_count, float frequency_hz)
 {
-    uint32_t i;
-    uint32_t crossing = 0U;
+    uint32_t i, k;
     float minimum = 1.0e30f;
     float maximum = -1.0e30f;
-    float step;
-    float period_length;
     static float s_values[UI_HMI_WAVE_PLOT_POINTS];
+    float dc = beta[0];
 
     if (frequency_hz < 1.0f) frequency_hz = 1000.0f;
-    if (peak_bin == 0U) peak_bin = 1U;
 
-    /* 复用 s_fft 做未加窗 FFT 用于频域滤波重建。
-     * analyse_frame 中 s_fft 已用于加窗 FFT 计算 s_magnitude，此处重新填充
-     * 未加窗数据。不影响后续 build_spectrum（它只用 s_magnitude）。 */
-    for (i = 0U; i < G_SIGNAL_FRAME_SAMPLES; ++i) {
-        s_fft[i].real = code_to_input_voltage(reverse12(
-            (uint16_t)(s_raw[i + G_SIGNAL_DISCARD_SAMPLES] & 0x0FFFU)));
-        s_fft[i].imag = 0.0f;
-    }
-    fft_transform_inplace_f32(s_fft, G_SIGNAL_FRAME_SAMPLES, 0U);
-
-    /* 频域滤波：保留主峰 ±3 bin 及 2~5 次谐波 ±3 bin，其余置零。
-     * 等效理想带通，滤除量化噪声和带外干扰。
-     * 对 50kHz~500kHz 全频段一致适用，不依赖 f1 精度，无相位漂移问题。
-     * 对正弦波只保留主峰（极其光滑），对方波/三角波保留低次谐波（保形状）。 */
-    s_fft[0].real = 0.0f;
-    s_fft[0].imag = 0.0f;
-    {
-        uint32_t h;
-        for (i = 1U; i < G_SIGNAL_FRAME_SAMPLES; ++i) {
-            uint8_t keep = 0U;
-            for (h = 1U; h <= 5U; ++h) {
-                uint32_t center = peak_bin * h;
-                int32_t diff = (int32_t)i - (int32_t)center;
-                if (diff < 0) diff = -diff;
-                if ((uint32_t)diff <= 3U) {
-                    keep = 1U;
-                    break;
-                }
-            }
-            if (keep == 0U) {
-                s_fft[i].real = 0.0f;
-                s_fft[i].imag = 0.0f;
-            }
-        }
-    }
-
-    /* IFFT 重建时域波形（逆变换内部已除以 N） */
-    fft_transform_inplace_f32(s_fft, G_SIGNAL_FRAME_SAMPLES, 1U);
-
-    /* 从过零点开始取 periods 个周期。
-     * 加 ±8 码滞回（对应 AD9226 12bit 量程 8/2048≈0.4%），避免噪声抖动误触发：
-     * 上升过零要求前点 < -hysteresis 且后点 > +hysteresis。 */
-    {
-        float hysteresis = 0.04f;  /* 约 8 码 / 2048 × 10V ≈ 0.04V */
-        for (i = 1U; i < G_SIGNAL_FRAME_SAMPLES; ++i) {
-            if (s_fft[i - 1U].real <= -hysteresis && s_fft[i].real > hysteresis) {
-                crossing = i;
-                break;
-            }
-        }
-        /* 滞回找不到则退化为简单过零 */
-        if (crossing == 0U) {
-            for (i = 1U; i < G_SIGNAL_FRAME_SAMPLES; ++i) {
-                if (s_fft[i - 1U].real <= 0.0f && s_fft[i].real > 0.0f) {
-                    crossing = i;
-                    break;
-                }
-            }
-        }
-    }
-    period_length = (float)G_SIGNAL_SAMPLE_RATE_HZ / frequency_hz;
-    step = ((float)periods * period_length) / (float)(UI_HMI_WAVE_PLOT_POINTS - 1U);
-
-    /* 线性插值采样并归一化 */
+    /* t 从 0 到 periods，对应 periods 个完整周期。
+     * 由于 ωk·n = 2π·k·f1/fs · n，而 n = t·fs/f1，
+     * 所以 ωk·n = 2π·k·t，与采样率无关。 */
     for (i = 0U; i < UI_HMI_WAVE_PLOT_POINTS; ++i) {
-        float index = (float)crossing + step * (float)i;
-        uint32_t i0 = (uint32_t)index % G_SIGNAL_FRAME_SAMPLES;
-        uint32_t i1 = (i0 + 1U) % G_SIGNAL_FRAME_SAMPLES;
-        float fraction = index - floorf(index);
-        float value = s_fft[i0].real + (s_fft[i1].real - s_fft[i0].real) * fraction;
+        float t = (float)i / (float)(UI_HMI_WAVE_PLOT_POINTS - 1U) * (float)periods;
+        float value = dc;
+        for (k = 0U; k < harmonics_count && k < FIT_MAX_HARMONICS; ++k) {
+            float phase = 2.0f * 3.14159265358979f * (float)(k + 1U) * t;
+            value += beta[1U + 2U * k] * cosf(phase);
+            value += beta[2U + 2U * k] * sinf(phase);
+        }
         s_values[i] = value;
         if (value < minimum) minimum = value;
         if (value > maximum) maximum = value;
@@ -397,6 +341,7 @@ static void analyse_frame(void)
     float fit_freq;
     float harm_freq[3];
     float harm_amp[3];
+    float fit_beta[FIT_MATRIX_DIM];
     float upp_avg, urms_avg, freq_avg;
 
     /* 1. 预处理：统计 min/max/sum2 用于 Urms 计算（max-min 仅作 fallback）。
@@ -444,7 +389,7 @@ static void analyse_frame(void)
                                        (float)G_SIGNAL_SAMPLE_RATE_HZ,
                                        fundamental.frequency_hz,
                                        fundamental.peak_bin,
-                                       &fit_freq, harm_freq, harm_amp);
+                                       &fit_freq, harm_freq, harm_amp, fit_beta);
 
     /* 4. 8 帧环形缓冲平均 + 突变检测。
      *    正常情况下平均 8 帧提升精度（×√8≈2.8）；
@@ -505,9 +450,11 @@ static void analyse_frame(void)
     wave.urms_mV = (uint32_t)(urms_avg + 0.5f);
     wave.fundamental_mHz = (uint32_t)(freq_avg * 1000.0f + 0.5f);
 
-    /* 6. 波形重建（FFT 频域滤波 + IFFT）和频谱图 */
-    build_wave(s_wave_one, 1U, fundamental.frequency_hz, fundamental.peak_bin);
-    build_wave(s_wave_three, 3U, fundamental.frequency_hz, fundamental.peak_bin);
+    /* 6. 波形重建（正弦模型）和频谱图。
+     *    用最小二乘拟合的 a/b 系数直接生成波形，数学级光滑，
+     *    无 FFT 频谱泄漏/混叠问题，全频段一致。 */
+    build_wave(s_wave_one, 1U, fit_beta, harm_freq, FIT_MAX_HARMONICS, fundamental.frequency_hz);
+    build_wave(s_wave_three, 3U, fit_beta, harm_freq, FIT_MAX_HARMONICS, fundamental.frequency_hz);
     build_spectrum(&ignored_peak);
     make_top3(&spectrum);
 
