@@ -1,9 +1,10 @@
 /**
  * @file ad9226_debug_nogain.h
- * @brief AD9226 A 通道低速并行采样调试模块（去增益版本）。
+ * @brief AD9226 A 通道高速并行采样调试模块（去增益版本，DMA 方式）。
  *
- * 与 ad9226_debug.h 接口完全一致，仅输出格式去掉 pp_dds_eq 字段。
- * 用于加直流偏置模块后的纯净衰减测量，不做源端补偿。
+ * TIM1_CH1 (PA8) 输出 ACLK，TIM1 Update 事件触发 DMA2_Stream1
+ * (Channel6 = TIM1_UP) 自动从 GPIOE->IDR 搬运 256 点到 SRAM，
+ * DMA 完成后主循环统计并通过 USART1 输出。
  *
  * 当前固定硬件映射：
  *   PA8 / TIM1_CH1 -> ACLK
@@ -18,10 +19,13 @@
 HAL_StatusTypeDef AD9226_Debug_Init(TIM_HandleTypeDef *htim,
                                     UART_HandleTypeDef *huart);
 
-/** 在 main 的 HAL_TIM_PeriodElapsedCallback 中、仅 TIM1 时调用。 */
+/** DMA 模式下保留为空，仅兼容 main.c 的 HAL_TIM_PeriodElapsedCallback。 */
 void AD9226_Debug_TimPeriodElapsedCallback(void);
 
 /** 在主循环中调用：完成一帧后通过 USART1 输出统计结果。 */
 void AD9226_Debug_Process(void);
+
+/** DMA 中断处理函数（由 stm32f4xx_it.c 的 DMA2_Stream5_IRQHandler 调用）。 */
+void AD9226_DMA_IRQHandler(void);
 
 #endif /* AD9226_DEBUG_NOGAIN_H */

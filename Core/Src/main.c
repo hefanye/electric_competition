@@ -19,16 +19,20 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "dac.h"
 #include "dma.h"
+#include "spi.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "ad9226_debug_nogain.h"
 #include "screen_protocol.h"
-#include "dds_at.h"
-#include "dds_ui.h"
+#include "ui_controller.h"
+#include "g_signal_measurement.h"
+#include "g_signal_pc_debug.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,9 +42,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* 正式屏幕控制模式：DDS 仅响应串口屏命令，不在上电时自动输出。 */
-#define DDS_DEBUG_RUN_ON_BOOT  0U
-
+#define AD9226_DEBUG_ENABLE        0U
+#define INTERNAL_ADC_DEBUG_ENABLE  0U
+#define DAC8830_DEBUG_ENABLE       0U
+#define G_SIGNAL_ENABLE             1U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -98,13 +103,51 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM2_Init();
   MX_UART5_Init();
+  MX_DAC_Init();
+  MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM5_Init();
+  MX_TIM6_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  HAL_UART_Transmit(&huart1, (uint8_t *)"BOOT\r\n", 6, 100);
+#if AD9226_DEBUG_ENABLE
+  if (AD9226_Debug_Init(&htim1, &huart1) != HAL_OK)
+  {
+    HAL_UART_Transmit(&huart1, (uint8_t *)"AD9226_INIT_FAIL\r\n", 18, 100);
+    Error_Handler();
+  }
+  HAL_UART_Transmit(&huart1, (uint8_t *)"AD9226_INIT_OK\r\n", 16, 100);
+#endif
+#if INTERNAL_ADC_DEBUG_ENABLE
+  if (ADC_Internal_Debug_Init(&hadc1, &htim2, &huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+#endif
+#if DAC8830_DEBUG_ENABLE
+  if (DAC8830_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (DAC8830_CLI_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+#endif
   Screen_Init();
-  DDS_Init(&huart5);
-  DDS_UI_Init();
-
-#if DDS_DEBUG_RUN_ON_BOOT
-  (void)DDS_DebugPointTest();
+  UI_Controller_Init();
+#if G_SIGNAL_ENABLE
+  GSignal_PCDebug_Init(&huart1);
+  if (GSignal_Init(&htim1) != HAL_OK)
+  {
+    HAL_UART_Transmit(&huart1, (uint8_t *)"GSIGNAL_INIT_FAIL\r\n", 19, 100);
+    Error_Handler();
+  }
+  HAL_UART_Transmit(&huart1, (uint8_t *)"GSIGNAL_INIT_OK\r\n", 17, 100);
+  /* 不自动触发采集，由串口屏令牌触发（比赛模式） */
 #endif
   /* USER CODE END 2 */
 
@@ -112,8 +155,20 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+#if AD9226_DEBUG_ENABLE
+    AD9226_Debug_Process();
+#endif
+#if INTERNAL_ADC_DEBUG_ENABLE
+    ADC_Internal_Debug_Process();
+#endif
+#if DAC8830_DEBUG_ENABLE
+    DAC8830_CLI_Process();
+#endif
     Screen_Process();
-    DDS_UI_Process();
+    UI_Controller_Process();
+#if G_SIGNAL_ENABLE
+    GSignal_Process();
+#endif
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -168,6 +223,19 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+#if AD9226_DEBUG_ENABLE
+  if (htim->Instance == TIM1)
+  {
+    AD9226_Debug_TimPeriodElapsedCallback();
+  }
+#endif
+}
+
+/* HAL_UART_RxCpltCallback / HAL_UART_ErrorCallback 已在 usart.c 中定义，
+ * 其中 USART1 分支调用 DAC8830_CLI_RxCpltCallback / DAC8830_CLI_UartErrorCallback。 */
 
 /* USER CODE END 4 */
 

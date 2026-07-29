@@ -1,31 +1,43 @@
 #include "screen_protocol.h"
 #include "usart.h"
 #include "dds_ui.h"
+#include "ui_controller.h"
 
 /*===========================================================================
  * TX 中断队列
  * 使用 HAL_UART_Transmit_IT, TXCpltCallback 自动发下一条
  *===========================================================================*/
 #define TX_BUF_MAX 128
-#define TX_Q_SIZE   8
+#define TX_Q_SIZE   16
 
 static struct { uint8_t buf[TX_BUF_MAX]; uint16_t len; } tx_q[TX_Q_SIZE];
 static volatile uint8_t  tx_head, tx_tail;
 static volatile uint8_t  tx_busy;
+static uint32_t screen_ready_due;
+static uint8_t screen_ready_retries;
 
 static void tx_send(void)
 {
+    HAL_StatusTypeDef status;
+
     if (tx_busy) return;
     if (tx_head == tx_tail) return;
     tx_busy = 1;
-    HAL_UART_Transmit_IT(&huart4, tx_q[tx_tail].buf, tx_q[tx_tail].len);
+    /* Curve pages can issue hundreds of "add" commands.  UART4 has a
+     * dedicated TX DMA stream, so use it instead of byte-by-byte TXE IRQ.
+     * The completion callback below advances the queue. */
+    status = HAL_UART_Transmit_DMA(&huart4, tx_q[tx_tail].buf, tx_q[tx_tail].len);
+    if (status != HAL_OK) {
+        /* Do not leave the queue permanently locked if UART was busy once.
+         * A later Screen_Process() call will retry the same command. */
+        tx_busy = 0U;
+    }
 }
 
-static void tx_enqueue(const uint8_t *data, uint16_t len)
+static uint8_t tx_enqueue(const uint8_t *data, uint16_t len)
 {
-    uint8_t term[3] = {0xFF, 0xFF, 0xFF};
     uint8_t n = (tx_head + 1) % TX_Q_SIZE;
-    if (n == tx_tail) return;
+    if (n == tx_tail) return 0U;
     uint16_t i = 0;
     while (i < len && i < TX_BUF_MAX - 4) { tx_q[tx_head].buf[i] = data[i]; i++; }
     tx_q[tx_head].buf[i++] = 0xFF;
@@ -34,6 +46,7 @@ static void tx_enqueue(const uint8_t *data, uint16_t len)
     tx_q[tx_head].len = i;
     tx_head = n;
     tx_send();
+    return 1U;
 }
 
 /* HAL 弱函数重定义 – TX 完成回调 */
@@ -60,7 +73,13 @@ volatile uint8_t  g_cmd_received = 0;
  *==============================================================*/
 static void SendBytes(const uint8_t *data, uint16_t len)
 {
-    tx_enqueue(data, len);
+    (void)tx_enqueue(data, len);
+}
+
+uint8_t Screen_TrySendCommand(const char *command)
+{
+    if (command == NULL) return 0U;
+    return tx_enqueue((const uint8_t *)command, (uint16_t)strlen(command));
 }
 
 void Screen_SendText(const char *ctrl_id, const char *text)
@@ -90,13 +109,28 @@ void Screen_SwitchPage(const char *page_name)
  *==============================================================*/
 void Screen_Init(void)
 {
+    tx_head = 0U;
+    tx_tail = 0U;
+    tx_busy = 0U;
+    rx_frame_len = 0U;
+    rx_ff_cnt = 0U;
+    g_cmd_received = 0U;
     UART_StartRx();
-    HAL_Delay(5000);
+    /* The HMI takes noticeably longer than the MCU to boot.  Re-send READY
+     * for several seconds, instead of losing the only command during HMI boot. */
+    screen_ready_due = HAL_GetTick() + 2200U;
+    screen_ready_retries = 0U;
+}
 
-    for (int i = 0; i < 3; i++) {
-        Screen_SendText("tsta", "READY");
-        HAL_Delay(800);
+void Screen_UartErrorCallback(void)
+{
+    if (huart4.Instance != UART4) {
+        return;
     }
+
+    /* Abort only the failed receive operation, then arm one-byte RX again. */
+    (void)HAL_UART_AbortReceive_IT(&huart4);
+    UART_StartRx();
 }
 
 /*==============================================================
@@ -148,6 +182,7 @@ static void HandleToken(const char *buf)
     const char *s = buf;
 
     /* DDS 指令交由独立模块处理，其他原有业务逻辑完全保留。 */
+    if (UI_Controller_HandleToken(buf)) return;
     if (DDS_UI_HandleScreenToken(buf)) return;
 
     p0[0] = p1[0] = p2[0] = p3[0] = '\0';
@@ -244,6 +279,16 @@ done:
  *==============================================================*/
 void Screen_Process(void)
 {
+    /* A failed DMA start is retried here; this is also harmless while idle. */
+    tx_send();
+
+    if (screen_ready_retries < 8U && (int32_t)(HAL_GetTick() - screen_ready_due) >= 0) {
+        if (Screen_TrySendCommand("tsta.txt=\"READY\"") != 0U) {
+            ++screen_ready_retries;
+            screen_ready_due += 500U;
+        }
+    }
+
     if (!g_cmd_received) return;
     g_cmd_received = 0;
     HandleToken(g_cmd_buffer);
