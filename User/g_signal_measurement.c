@@ -312,14 +312,26 @@ static void build_wave(uint8_t *destination, uint8_t periods,
     float maximum = -1.0e30f;
     static float s_values[UI_HMI_WAVE_PLOT_POINTS];
     float dc = beta[0];
+    float a1 = beta[1];
+    float b1 = beta[2];
+    /* 相位补偿：让 t=0 对应基波的上升过零点。
+     * 基波模型 a1·cos(2πt) + b1·sin(2πt) = R·sin(2πt + φ)
+     * 其中 R=√(a1²+b1²)，φ=atan2(a1,b1)。
+     * 上升过零点（斜率>0）在 2πt+φ=0，即 t0 = -φ/(2π) = -atan2(a1,b1)/(2π)。
+     * 令 t' = t - t0，则 t'=0 时为上升过零点。
+     * 这样每次触发采集无论 DMA 起点相位如何，波形都从过零点开始，
+     * 消除"每次截取不同相位段导致波形不对称"的问题。 */
+    float t0_offset = -atan2f(a1, b1) / (2.0f * 3.14159265358979f);
+    /* 归一化到 [0, 1) 一个周期内 */
+    t0_offset = t0_offset - floorf(t0_offset);
 
     if (frequency_hz < 1.0f) frequency_hz = 1000.0f;
 
-    /* t 从 0 到 periods，对应 periods 个完整周期。
+    /* t 从 t0_offset 开始，跨越 periods 个周期。
      * 由于 ωk·n = 2π·k·f1/fs · n，而 n = t·fs/f1，
      * 所以 ωk·n = 2π·k·t，与采样率无关。 */
     for (i = 0U; i < UI_HMI_WAVE_PLOT_POINTS; ++i) {
-        float t = (float)i / (float)(UI_HMI_WAVE_PLOT_POINTS - 1U) * (float)periods;
+        float t = t0_offset + (float)i / (float)(UI_HMI_WAVE_PLOT_POINTS - 1U) * (float)periods;
         float value = dc;
         for (k = 0U; k < harmonics_count && k < FIT_MAX_HARMONICS; ++k) {
             float phase = 2.0f * 3.14159265358979f * (float)(k + 1U) * t;
