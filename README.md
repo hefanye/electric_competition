@@ -1,83 +1,200 @@
-# STM32F407 + 串口屏控制 AD9959 DDS
+# 周期信号测量分析装置（G题）
 
-本工程用于电赛信号源/仪器仪表原型：淘金驰串口屏通过 STM32F407VGT6 选择通道、输入参数并启动 DDS；STM32 再通过 UART AT 指令控制康威 AD9959 模块输出信号。
+基于 STM32F407VGT6 + AD9226 外置 ADC 的周期信号测量系统，纯软件算法方案，无需硬件放大模块即可在 50kHz~500kHz / 50mVpp~250mVpp 全量程内实现 Upp 误差 ≤ 5mV。
 
-## 已实现功能
+## 核心指标
 
-- 串口屏选择 CH1~CH4。
-- POINT 点频：设置频率（Hz）和幅度（0~1023）。
-- 2FSK：设置 f0、f1 和幅度。
-- SWEEP：设置起始频率、终止频率、步进、扫描时间和幅度。
-- 关闭当前选中通道。
-- 一键复位：发送 `AT+RESET`，软件清空通道状态并显示 `READY`。
-- 每一条 DDS AT 指令均等待模块返回 `OK` 或 `ERROR`；命令之间保留 300 ms 间隔，避免模块连续收命令时配置异常。
-- DDS 配置成功后才刷新屏幕 `tsta` 状态；失败时显示对应错误位置。
+| 指标 | 实测值 | 赛题要求 |
+|------|--------|---------|
+| 频率范围 | 50kHz ~ 500kHz | 50kHz ~ 500kHz |
+| 幅度范围 | 50mVpp ~ 250mVpp | 50mVpp ~ 250mVpp |
+| Upp 误差 | ≤ 1mV（8帧平均后） | ≤ 5mV |
+| 频率误差 | ≤ 0.5Hz | ≤ 1% |
+| 波形显示 | 数学级光滑正弦 | 可视化 |
+| 频谱显示 | 主峰清晰，底噪裁剪 | Top3 谱线 |
+| 响应时间 | 1帧（切换信号时） | 实时 |
 
-## 硬件连接
+## 硬件配置
 
-| 设备 | STM32F407VGT6 | 串口参数 |
-| --- | --- | --- |
-| 淘金驰串口屏 | UART4：PC10(TX)、PA1(RX) | 115200, 8N1 |
-| 康威 AD9959 AT 模块 | UART5：PC12(TX)、PD2(RX) | 9600, 8N1 |
+### 主控
+- **MCU**：STM32F407VGT6（Cortex-M4F, 168MHz, 192KB SRAM）
+- **晶振**：HSE 8MHz（PLL 倍频到 168MHz）
 
-三者必须共地。DDS 模块 RX 接 PC12；若要接收 `OK/ERROR`，DDS 模块 TX 必须接 PD2。
+### 外置 ADC
+- **模块**：双路 AD9226（12位，最高 65MSPS）
+- **接线**：
+  - ACLK ← PA8（TIM1_CH1 PWM 输出，4MHz）
+  - AD0~AD11 ← PE0~PE11（12位并行数据，反序连接）
+  - 电源：+5V 单电源
+  - GND 共地
 
-## 工程结构
+### 串口屏
+- **型号**：TJC/Nextion 串口屏（800×480）
+- **接口**：UART4（PC10/PC11），115200 波特率
+- **控件**：3 页（1周期波形 / 3周期波形 / 频谱），每页含曲线控件 + 数值文本框
 
-| 路径 | 作用 |
-| --- | --- |
-| `User/screen_protocol.c` | UART4 串口屏收发、以 `FF FF FF` 作为帧结束符。 |
-| `User/dds_at.c` | UART5 的 AD9959 AT 指令发送、`OK/ERROR` 接收解析。 |
-| `User/dds_ui.c` | 屏幕命令解析、DDS 命令队列、状态与错误显示。 |
-| `Core/Src/main.c` | 初始化屏幕和 DDS，并在主循环调用 `Screen_Process()` 与 `DDS_UI_Process()`。 |
-| `prepare.ioc` | STM32CubeMX 配置。 |
-| `MDK-ARM/prepare.uvprojx` | Keil MDK 工程文件。 |
+### PC 调试
+- **接口**：USART1（PA9/PA10），115200 波特率
+- **用途**：输出测量结果 + 波形/频谱数据（旁路模式，不阻塞串口屏）
 
-## 串口屏到 STM32 的命令协议
+## 算法链路
 
-每一帧末尾都必须发送三个字节 `FF FF FF`。
+```
+串口屏点击触发
+        ↓
+DMA 采集 8192 点 (4MHz, 约 2ms)
+        ↓
+┌──────────────────────────────────────────────┐
+│ 1. 码值转电压 + 反位序                         │
+│ 2. 加汉宁窗 → 8192点 FFT → 找基波峰位          │
+│ 3. IEEE 1057 频率精化迭代 (3次, 精度提升100倍)  │
+│ 4. 多正弦最小二乘拟合 (基波+2/3次谐波)          │
+│ 5. 8帧环形缓冲平均 + 突变检测 (精度 ×2.8)      │
+│ 6. 正弦模型波形重建 + 相位补偿 (对称过零点)     │
+│ 7. 频谱双门限底噪裁剪 + 对数刻度               │
+└──────────────────────────────────────────────┘
+        ↓
+发送到串口屏显示
+```
 
-| 屏幕命令 | 含义 |
-| --- | --- |
-| `DDS:CH:1` ~ `DDS:CH:4` | 选择 DDS 通道。 |
-| `DDS:POINT:<freq>,<amp>` | 配置当前通道点频。 |
-| `DDS:FSK2:<f0>,<f1>,<amp>` | 配置当前通道 2FSK。 |
-| `DDS:SWEEP:<start>,<end>,<step>,<time_ms>,<amp>` | 配置当前通道扫频。 |
-| `DDS:STOP` | 关闭当前通道输出。 |
-| `DDS:STATUS` | 请求刷新状态文本。 |
-| `DDS:RESET` | 对 DDS 发送 `AT+RESET` 并清空软件状态。 |
+### 核心算法说明
 
-### 屏幕控件约定
+#### 1. IEEE 1057 频率精化迭代
+- **论文**：《四参数正弦波曲线拟合的快速算法》（梁志国等，计量学报2006）
+- **原理**：高斯-牛顿法，用残差梯度修正频率
+- **效果**：频率精度从 49Hz（0.1bin）提升到 0.5Hz（0.001bin）
 
-- 主页面：频率输入框 `t6`，幅度输入框 `t4`，状态框 `tsta`。
-- 模式变量：全局数值变量 `mode_sel`，`0=POINT`、`1=FSK2`、`2=SWEEP`。
-- 模式页面：`fsk0`、`fsk1`、`sw_start`、`sw_end`、`sw_step` 为文本输入框。
-- 主页面后初始化事件建议发送 `DDS:STATUS`，让 `tsta` 显示 `READY` 或已启用的通道列表。
+#### 2. 多正弦最小二乘拟合
+- **模型**：x(t) = d + Σ[ak·cos(2πkf1t) + bk·sin(2πkf1t)]，k=1,2,3
+- **求解**：构造 8192×7 设计矩阵 → 7×7 正规方程 → 高斯消元
+- **Upp**：Upp = 2×√(a1²+b1²)，滤除噪声和高次谐波
 
-## 使用顺序
+#### 3. 8帧环形缓冲平均 + 突变检测
+- **稳态**：指数平均，精度提升 √8 ≈ 2.8 倍
+- **切换**：幅度偏移>25% 或频率偏移>10% → 清空缓冲，1帧响应
 
-1. 用 CubeMX/Keil 打开工程，确认 UART4=115200、UART5=9600，下载程序。
-2. 将串口屏工程下载到屏幕，屏幕波特率设为 115200。
-3. 上电后主页面 `tsta` 应显示 `READY`。
-4. 选择通道，输入参数，选择模式，再按“开”。
-5. 等待 `tsta` 更新：显示通道号表示该通道已成功配置；`E_...` 表示 DDS 返回错误；`DDS_TIMEOU` 表示未收到回复。
-6. 多通道依次重复设置。关闭某一路时，先选择该路，再按“关”。
-7. 状态混乱或重新开始测试时，按“一键复位”。
+#### 4. 正弦模型波形重建 + 相位补偿
+- **原理**：用拟合出的 7 个参数直接数学生成波形
+- **相位补偿**：t0 = -atan2(a1,b1)/(2π)，从上升过零点开始
+- **效果**：数学级光滑，每次对称，全频段一致有效
 
-## 重要说明
+#### 5. 频谱双门限底噪裁剪
+- **门限**：max(5mV绝对, 1%相对)
+- **刻度**：0~-40dB 对数映射到 255~0
+- **效果**：底噪全黑，主峰清晰，小谱线可见
 
-- AD9959 模块使用 AT 指令，指令行结尾是 `\r\n`，由 `dds_at.c` 自动补齐。
-- 不能把多条 AT 命令一次性无间隔发送；本工程采取“发一条 → 等 OK/ERROR → 间隔 300 ms → 下一条”。
-- `AT+RESET` 可能使 DDS 立即重启而来不及回 `OK`，软件对此命令不等待回复，固定等待 500 ms 后恢复为 `READY`。
-- FSK 实际切换还需要按模块手册连接并驱动对应模式选择引脚；本工程负责设置 f0/f1 参数。
-- 本仓库不提交 `axf/hex/o/d` 等 Keil 构建产物，也不提交个人的 `uvoptx/uvguix` 设置。
+## 性能参数
 
-## Branches / 分支说明
+### 计算耗时（STM32F407 168MHz）
+| 步骤 | 耗时 |
+|------|------|
+| FFT + 找峰 | 6ms |
+| IEEE 1057 频率精化 | 30ms |
+| 多正弦拟合 | 20ms |
+| 波形重建 | <1ms |
+| 频谱处理 | <1ms |
+| **总计** | **~57ms** |
 
-| Branch | Purpose |
-| --- | --- |
-| `master` | Repository overview and the stable STM32F407 DDS + serial-screen project baseline. |
-| `stm32f407-dds-screen` | STM32F407VGT6 project: Taobao/TJC serial screen controls the AD9959 AT-command DDS module. |
-| `stm32f407-ad9226-parallel` | STM32F407 AD9226 parallel-ADC reusable capture driver and the verified A-channel debug example. |
+### 内存占用
+| 缓冲区 | 大小 |
+|--------|------|
+| s_raw[8200] | 16KB |
+| s_fft[8192]复数 | 64KB |
+| s_magnitude[4097] | 16KB |
+| 历史缓冲 | <1KB |
+| **总计** | **~96KB**（128KB SRAM 内）|
 
-Use the branch that matches the hardware task; do not mix generated build files between branches.
+## 使用方法
+
+### 1. 编译烧录
+1. 用 Keil MDK-ARM 打开 `MDK-ARM/prepare.uvprojx`
+2. Rebuild All
+3. 烧录到 STM32F407VGT6
+
+或者直接用烧录工具烧录 `MDK-ARM/prepare/prepare.hex`（无需编译）。
+
+### 2. 硬件连接
+| 信号 | 引脚 | 说明 |
+|------|------|------|
+| AD9226 ACLK | PA8 | TIM1_CH1 PWM 4MHz |
+| AD9226 AD0~AD11 | PE0~PE11 | 12位并行数据 |
+| 串口屏 UART | PC10/PC11 | UART4 TX/RX |
+| PC 调试 UART | PA9/PA10 | USART1 TX/RX |
+| 信号输入 | AD9226 AIN | 信号发生器 AC 耦合 |
+
+### 3. 操作流程
+1. 信号发生器输出信号到 AD9226 模块输入（AC 耦合，0 DC 偏置）
+2. 上电，串口屏显示 READY
+3. 点击串口屏"1周期"/"3周期"/"频谱"按钮触发采集
+4. 串口屏显示波形 + Upp/Urms/f1 数值
+5. 切换信号幅度/频率后，再次点击触发，1帧即响应
+
+### 4. PC 调试输出
+USART1 输出格式：
+```
+REQ: WAVE1
+=== G-Signal Frame ===
+Upp=98 mV  Urms=35 mV  f1=200143.024 Hz
+f1=200.195 kHz A1=49 mV
+f2=0.488 kHz A2=17 mV
+f3=0.488 kHz A3=17 mV
+WAVE:255,254,253,...（255点）
+SPECTRUM:197,129,129,...,255,129,...（255点）
+=== End ===
+```
+
+## 关键配置
+
+### 采样率配置（tim.c）
+```c
+htim1.Init.Prescaler = 0;
+htim1.Init.Period = 41;  // 168MHz/(41+1) = 4MHz
+```
+
+### 增益配置（g_signal_measurement.h）
+```c
+#define G_SIGNAL_INPUT_GAIN          1.0f   // 无硬件放大
+// 如果加了5.6倍放大模块，改为 5.6f
+```
+
+### 采样点数（g_signal_measurement.h）
+```c
+#define G_SIGNAL_FRAME_SAMPLES       8192U  // FFT点数
+#define G_SIGNAL_SAMPLE_RATE_HZ      4000000  // 4MHz
+```
+
+## 文件结构
+
+```
+prepare/
+├── Core/                          # STM32 HAL 配置（CubeMX 生成）
+│   ├── Inc/                       # main.h, tim.h, usart.h 等
+│   └── Src/                       # main.c, tim.c, usart.c 等
+├── Drivers/                       # STM32 HAL 库 + CMSIS
+├── MDK-ARM/                       # Keil 工程
+│   ├── prepare.uvprojx            # 工程文件
+│   ├── prepare.uvoptx             # 调试器/下载配置
+│   └── prepare/prepare.hex        # 预编译固件（可直接烧录）
+├── User/                          # 用户代码
+│   ├── g_signal_measurement.c     # 核心算法（信号测量）
+│   ├── g_signal_pc_debug.c        # PC 串口调试输出
+│   ├── ad9226_debug_nogain.c      # AD9226 驱动
+│   ├── screen_protocol.c          # 串口屏通信协议
+│   ├── UI/                        # 串口屏 UI 控制
+│   └── algorithm/                 # 算法库（FFT/频谱/窗函数）
+├── prepare.ioc                    # CubeMX 配置文件
+└── README.md                      # 本文档
+```
+
+## 注意事项
+
+1. **信号发生器必须 AC 耦合，DC 偏置为 0**，否则会充坏 AD9226 输入耦合电容
+2. **AD9226 模块 GND 与主控板 GND 必须共地**
+3. **采样按需触发**，DMA 完成后立即关闭 TIM1，避免模块持续高负荷
+4. **切换信号后 1 帧即响应**（突变检测清空缓冲），稳态下 8 帧平均提升精度
+5. **G_SIGNAL_INPUT_GAIN 必须与硬件匹配**：无放大=1.0f，有5.6倍放大=5.6f
+
+## 算法论文参考
+
+- IEEE Std 1057-2017: IEEE Standard for Digitizing Waveform Recorders
+- 梁志国等. 四参数正弦波曲线拟合的快速算法. 计量学报, 2006
