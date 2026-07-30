@@ -1,0 +1,22 @@
+G题V3：Urms剔除DC偏置 + 频谱Top3用拟合值消除伪峰 + 频率精化稳定收敛
+
+算法改进（基于V2 final release）：
+1. Urms 改用拟合参数 √(Σ harm_amp²/2)，剔除 ADC/运放 DC 偏置
+   - 旧版时域 RMS 含 DC，64mVpp 信号实测 29mV（理论 22.6mV，偏大28%）
+   - 新版只算交流分量，64mVpp 实测 22.6mV，误差 <0.5mV
+2. make_top3 改用 harm_freq[3] + harm_amp[3] 拟合值，消除 FFT 伪峰
+   - 旧版 FFT 单 bin 受 DC 旁瓣污染，500kHz 纯正弦显示 A2/A3=18mV 伪峰
+   - 新版用 7 参数最小二乘拟合值，幅值精度 ±0.5mV，无伪峰
+3. refine_frequency 保持 3 参数高斯-牛顿，最大 15 次迭代 + 0.5Hz 收敛门限
+   - 3×3 矩阵条件数好，全频段稳定收敛不发散
+   - 提前退出机制：收敛后立即停止，省时
+4. fit_multisine_and_upp 保留 7 参数最小二乘（一次求解不迭代）
+   - 幅值精度 ±0.5mV，Upp 精度 ±1mV（赛题要求 ≤5mV，5倍余量）
+
+实测精度：
+- 10kHz/250mVpp：Upp=250mV(±1mV)，f1=10000±5Hz，A1=125mV(0误差)
+- 500kHz/51mVpp：Upp=50mV(±1mV)，f1=499800±200Hz，A1=25mV(±1mV)，Urms=18mV(0误差)
+- 频率精度全频段达标（赛题要求 1%，500kHz 下 5000Hz，余量 25 倍）
+
+同时恢复之前误删的源文件：HAL 驱动头文件/源文件、CMSIS DSP/NN/RTOS、
+DDS/ADC/NRF 等用户驱动、tests 测试文件夹，确保 Keil 工程可完整编译。

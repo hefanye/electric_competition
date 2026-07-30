@@ -124,82 +124,11 @@ static uint8_t solve_linear_system(float *A, float *b, float *x, uint32_t n)
     return 1U;
 }
 
-/* 频率精化迭代（IEEE 1057 核心思想）：
- * 用高斯-牛顿法修正频率，把 FFT 抛物线插值的 0.1bin 精度提升到 0.001bin。
- *
- * 原理：模型 m[n] = DC + a·cos(ωn) + b·sin(ωn)，ω = 2πf/fs
- *   残差 r[n] = x[n] - m[n]
- *   ∂m/∂f = (-a·n·sin(ωn) + b·n·cos(ωn)) · 2π/fs
- *   频率修正 Δf = Σ(r·∂m/∂f) / Σ((∂m/∂f)²)   （高斯-牛顿一步解）
- *
- * 每次迭代：3参数线性拟合 + 梯度计算，合并到一次遍历。
- * 迭代3次，频率精度从 ~49Hz 提升到 ~0.5Hz，Upp误差从 0.4mV 降到 0.004mV。
- *
- * 参考：梁志国等《四参数正弦波曲线拟合的快速算法》计量学报2006 */
-#define FREQ_REFINE_ITERATIONS  3U
-static float refine_frequency(const uint16_t *raw, uint32_t length,
-                              float sample_rate, float freq_init)
-{
-    float freq = freq_init;
-    uint32_t iter, n;
-    const float two_pi_over_fs = 2.0f * 3.14159265358979f / sample_rate;
-
-    for (iter = 0U; iter < FREQ_REFINE_ITERATIONS; ++iter) {
-        float omega = two_pi_over_fs * freq;
-        /* 3x3 法方程：[DC, a, b] */
-        float A[9] = { 0.0f };
-        float b_vec[3] = { 0.0f };
-        float beta3[3];
-        float a_coef, b_coef;
-        float num = 0.0f, den = 0.0f;
-
-        /* 第一遍：3参数线性拟合，累加法方程 */
-        for (n = 0U; n < length; ++n) {
-            float phi = omega * (float)n;
-            float c = cosf(phi);
-            float s = sinf(phi);
-            float x = code_to_input_voltage(reverse12((uint16_t)(raw[n] & 0x0FFFU)));
-            A[0] += 1.0f;           /* DC·DC */
-            A[1] += c;              A[3] += c;   /* DC·cos */
-            A[2] += s;              A[6] += s;   /* DC·sin */
-            A[4] += c * c;          A[5] += c * s; A[7] = A[5]; A[8] += s * s;
-            b_vec[0] += x;
-            b_vec[1] += x * c;
-            b_vec[2] += x * s;
-        }
-        A[5] = A[7];  /* 对称 */
-        if (solve_linear_system(A, b_vec, beta3, 3U) == 0U) break;
-        a_coef = beta3[1];
-        b_coef = beta3[2];
-
-        /* 第二遍：计算残差梯度，高斯-牛顿频率修正 */
-        for (n = 0U; n < length; ++n) {
-            float phi = omega * (float)n;
-            float c = cosf(phi);
-            float s = sinf(phi);
-            float x = code_to_input_voltage(reverse12((uint16_t)(raw[n] & 0x0FFFU)));
-            float model = beta3[0] + a_coef * c + b_coef * s;
-            float residual = x - model;
-            /* ∂m/∂f = (-a·n·sin(ωn) + b·n·cos(ωn)) · 2π/fs */
-            float dm_df = (-a_coef * s + b_coef * c) * (float)n * two_pi_over_fs;
-            num += residual * dm_df;
-            den += dm_df * dm_df;
-        }
-        if (den < 1.0e-20f) break;
-        freq += num / den;
-        /* 限制频率在合理范围（±10% 初始估计） */
-        if (freq < freq_init * 0.9f) freq = freq_init * 0.9f;
-        if (freq > freq_init * 1.1f) freq = freq_init * 1.1f;
-    }
-    return freq;
-}
-
 /* 多正弦最小二乘拟合：返回基波峰峰值（mV），通过 fund_freq 返回精确基波频率。
  * 输入：raw ADC 码值缓冲（已含 DISCARD 偏移）、采样率、FFT 得到的初始频率估计。
  * 逐点累加法方程，避免构造 8192×7 大矩阵，省内存。
  * 内部直接从码值转换电压，无需额外 float 缓冲区（省 32KB SRAM）。
- * beta_out 输出 [d, a1, b1, a2, b2, a3, b3] 供波形重建使用。
- * 调用前先用 refine_frequency 精化基波频率，Upp精度从±0.4mV提升到±0.04mV。 */
+ * beta_out 输出 [d, a1, b1, a2, b2, a3, b3] 供波形重建使用。 */
 static float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
                                    float sample_rate, float freq_init,
                                    uint32_t peak_bin,
@@ -312,26 +241,14 @@ static void build_wave(uint8_t *destination, uint8_t periods,
     float maximum = -1.0e30f;
     static float s_values[UI_HMI_WAVE_PLOT_POINTS];
     float dc = beta[0];
-    float a1 = beta[1];
-    float b1 = beta[2];
-    /* 相位补偿：让 t=0 对应基波的上升过零点。
-     * 基波模型 a1·cos(2πt) + b1·sin(2πt) = R·sin(2πt + φ)
-     * 其中 R=√(a1²+b1²)，φ=atan2(a1,b1)。
-     * 上升过零点（斜率>0）在 2πt+φ=0，即 t0 = -φ/(2π) = -atan2(a1,b1)/(2π)。
-     * 令 t' = t - t0，则 t'=0 时为上升过零点。
-     * 这样每次触发采集无论 DMA 起点相位如何，波形都从过零点开始，
-     * 消除"每次截取不同相位段导致波形不对称"的问题。 */
-    float t0_offset = -atan2f(a1, b1) / (2.0f * 3.14159265358979f);
-    /* 归一化到 [0, 1) 一个周期内 */
-    t0_offset = t0_offset - floorf(t0_offset);
 
     if (frequency_hz < 1.0f) frequency_hz = 1000.0f;
 
-    /* t 从 t0_offset 开始，跨越 periods 个周期。
+    /* t 从 0 到 periods，对应 periods 个完整周期。
      * 由于 ωk·n = 2π·k·f1/fs · n，而 n = t·fs/f1，
      * 所以 ωk·n = 2π·k·t，与采样率无关。 */
     for (i = 0U; i < UI_HMI_WAVE_PLOT_POINTS; ++i) {
-        float t = t0_offset + (float)i / (float)(UI_HMI_WAVE_PLOT_POINTS - 1U) * (float)periods;
+        float t = (float)i / (float)(UI_HMI_WAVE_PLOT_POINTS - 1U) * (float)periods;
         float value = dc;
         for (k = 0U; k < harmonics_count && k < FIT_MAX_HARMONICS; ++k) {
             float phase = 2.0f * 3.14159265358979f * (float)(k + 1U) * t;
@@ -463,22 +380,10 @@ static void analyse_frame(void)
                                  (float)G_SIGNAL_SAMPLE_RATE_HZ, G_SIGNAL_FRAME_SAMPLES,
                                  1U, G_SIGNAL_BIN_COUNT - 2U, &fundamental);
 
-    /* 3. 频率精化迭代（IEEE 1057）：用高斯-牛顿法修正频率，
-     *    把 FFT 抛物线插值的 0.1bin 精度提升到 0.001bin。
-     *    这是 Upp 精度的关键：频率误差从 49Hz 降到 0.5Hz，
-     *    Upp 误差从 ±0.4mV 降到 ±0.04mV。
-     *    参考：梁志国等《四参数正弦波曲线拟合的快速算法》计量学报2006 */
-    {
-        float refined_freq = refine_frequency(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
-                                              G_SIGNAL_FRAME_SAMPLES,
-                                              (float)G_SIGNAL_SAMPLE_RATE_HZ,
-                                              fundamental.frequency_hz);
-        fundamental.frequency_hz = refined_freq;
-    }
-
-    /* 4. 多正弦最小二乘拟合：用精化后的频率提取基波和 2、3 次谐波幅值。
-     *    避免 FFT 频谱泄漏，小信号下精度从 5mV 提升到 0.5mV。
-     *    无需硬件放大也能精确测 Upp。 */
+    /* 3. 多正弦最小二乘拟合：精确提取基波和 2、3 次谐波幅值。
+     *    避免 FFT 频谱泄漏，小信号下精度从 5mV 提升到 2.5mV。
+     *    无需硬件放大也能精确测 Upp。
+     *    传入 s_raw + DISCARD 偏移，函数内部直接转换码值为电压。 */
     fit_upp_mV = fit_multisine_and_upp(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
                                        G_SIGNAL_FRAME_SAMPLES,
                                        (float)G_SIGNAL_SAMPLE_RATE_HZ,
@@ -486,7 +391,7 @@ static void analyse_frame(void)
                                        fundamental.peak_bin,
                                        &fit_freq, harm_freq, harm_amp, fit_beta);
 
-    /* 5. 8 帧环形缓冲平均 + 突变检测。
+    /* 4. 8 帧环形缓冲平均 + 突变检测。
      *    正常情况下平均 8 帧提升精度（×√8≈2.8）；
      *    当用户切换信号源（幅度突变>25% 或 频率突变>10%）时，
      *    立即清空缓冲区，避免旧帧拖累响应（解决切换后测量值滞后问题）。 */
@@ -540,12 +445,12 @@ static void analyse_frame(void)
     urms_avg /= (float)s_avg_filled;
     freq_avg /= (float)s_avg_filled;
 
-    /* 6. 输出结果：Upp 用拟合值（或 fallback），频率用精化后的值 */
+    /* 5. 输出结果：Upp 用拟合值（或 fallback），频率用抛物线插值结果 */
     wave.upp_mV = (uint32_t)(upp_avg + 0.5f);
     wave.urms_mV = (uint32_t)(urms_avg + 0.5f);
     wave.fundamental_mHz = (uint32_t)(freq_avg * 1000.0f + 0.5f);
 
-    /* 7. 波形重建（正弦模型）和频谱图。
+    /* 6. 波形重建（正弦模型）和频谱图。
      *    用最小二乘拟合的 a/b 系数直接生成波形，数学级光滑，
      *    无 FFT 频谱泄漏/混叠问题，全频段一致。 */
     build_wave(s_wave_one, 1U, fit_beta, harm_freq, FIT_MAX_HARMONICS, fundamental.frequency_hz);

@@ -1,55 +1,23 @@
-# Keil MDK build intermediate artifacts
-*.axf
-*.map
-*.lnp
+# Keil build output
+MDK-ARM/**/Listings/
+MDK-ARM/**/Objects/
+MDK-ARM/**/*.dep
+MDK-ARM/**/*.htm
+MDK-ARM/**/*.build_log.htm
+MDK-ARM/**/*.map
+MDK-ARM/**/*.lnp
+MDK-ARM/prepare/prepare
+build.log
 *.o
 *.d
-*.crf
-*.iex
-*.htm
-*.dep
-*.bak
-*.plg
-*.sct
-*.ini
-JLinkLog.txt
+*.axf
+*.hex
+*.uvguix.*
+*.uvoptx
 
-# Build directories (intermediate objects)
-MDK-ARM/Objects/
-MDK-ARM/Listings/
-
-# Keep project config & pre-built firmware for "pull and use"
-!MDK-ARM/prepare.uvprojx
-!MDK-ARM/prepare.uvoptx
-!MDK-ARM/prepare/
-!MDK-ARM/startup_stm32f407xx.s
-
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# IDE
-.vscode/
-.idea/
-
-# Temporary
-*.tmp
-*.log
-
-# Reference docs (not needed for build)
-STM32F407VGT6_算法库实机验证方案.md
-STM32F407_CubeMX常用配置模板.md
-README_GSIGNAL.md
-README_GSIGNAL_V2.md
-
-# Analysis scripts (temporary dev tools)
+# 临时分析脚本与输出
 analyze_*.py
 analysis_output.txt
-*.py
 
-# Keil user-specific GUI layout
-*.uvguix.*
-
-# Test binaries
-MDK-ARM/prepare_test.bin
+# CubeMX 临时
+.mxproject
