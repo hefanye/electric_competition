@@ -8,6 +8,7 @@ MDK-ARM/**/*.map
 MDK-ARM/**/*.lnp
 MDK-ARM/prepare/prepare
 build.log
+build_log.txt
 *.o
 *.d
 *.axf
