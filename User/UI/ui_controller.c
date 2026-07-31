@@ -13,6 +13,7 @@
 #include "ui_hmi_map.h"
 #include "ui_plot.h"
 #include "g_signal_measurement.h"
+#include "g_signal_u.h"
 
 #include <string.h>
 
@@ -62,6 +63,9 @@ void UI_Controller_Init(void)
 void UI_Controller_Process(void)
 {
     UI_Plot_Process();
+    /* 两个测量模块都轮询，各自通过 busy 标志互斥运行 */
+    GSignal_Process();
+    GSignalU_Process();
 }
 
 void UI_Controller_SetRequirement(ui_requirement_t requirement)
@@ -166,14 +170,22 @@ uint8_t UI_Controller_HandleToken(const char *token)
 
     if (strcmp(token, "UI:REQ:UA") == 0) {
         UI_Controller_SetRequirement(UI_REQUIREMENT_UA);
+        /* 切回一二题：先中止 U 模块（如果在运行），再切换采样率 */
+        GSignalU_Abort();
+        GSignal_SetSampleRate(0U);
         return 1U;
     }
     if (strcmp(token, "UI:REQ:UB") == 0) {
         UI_Controller_SetRequirement(UI_REQUIREMENT_UB);
+        GSignalU_Abort();
+        GSignal_SetSampleRate(0U);
         return 1U;
     }
     if (strcmp(token, "UI:REQ:U") == 0) {
         UI_Controller_SetRequirement(UI_REQUIREMENT_U);
+        /* 第三题抗干扰：GSignal_SetSampleRate(1) 会停止一二题 DMA 并切换 ARR。
+         * U 模块的采集由后续 WAVE/SPECTRUM 令牌触发 GSignalU_Request。 */
+        GSignal_SetSampleRate(1U);
         return 1U;
     }
     if (strcmp(token, "UI:PAGE:HOME") == 0) {
@@ -182,9 +194,19 @@ uint8_t UI_Controller_HandleToken(const char *token)
         return 1U;
     }
     if (strcmp(token, "UI:PAGE:MENU") == 0) {
-        /* p_menu owns t_menu_req, so write it only after that page reports
-         * that it has completed its own initialization. */
+        /* p_menu owns t_menu_req and t_menu_cfg, so write them only after
+         * that page reports that it has completed its own initialization. */
+        uint32_t rate;
         UI_Display_ShowRequirement(s_requirement);
+        /* 校验采样率配置是否切换成功，显示到 t_menu_cfg 控件 */
+        rate = GSignal_GetSampleRate();
+        if (s_requirement == UI_REQUIREMENT_U) {
+            UI_Display_SetMenuConfig((rate == G_SIGNAL_SAMPLE_RATE_10M_HZ) ?
+                                     "10M OK" : "10M FAIL");
+        } else {
+            UI_Display_SetMenuConfig((rate == G_SIGNAL_SAMPLE_RATE_HZ) ?
+                                     "4M OK" : "4M FAIL");
+        }
         return 1U;
     }
     if (strcmp(token, "UI:PAGE:WAVE_SELECT") == 0) {
@@ -195,15 +217,28 @@ uint8_t UI_Controller_HandleToken(const char *token)
         return 1U;
     }
     if (strcmp(token, "UI:PAGE:WAVE1") == 0) {
-        GSignal_Request(s_requirement, UI_VIEW_WAVE_1PERIOD);
+        /* U 模式走独立模块，一二题走原模块 */
+        if (s_requirement == UI_REQUIREMENT_U) {
+            GSignalU_Request(s_requirement, UI_VIEW_WAVE_1PERIOD);
+        } else {
+            GSignal_Request(s_requirement, UI_VIEW_WAVE_1PERIOD);
+        }
         return 1U;
     }
     if (strcmp(token, "UI:PAGE:WAVE3") == 0) {
-        GSignal_Request(s_requirement, UI_VIEW_WAVE_3PERIOD);
+        if (s_requirement == UI_REQUIREMENT_U) {
+            GSignalU_Request(s_requirement, UI_VIEW_WAVE_3PERIOD);
+        } else {
+            GSignal_Request(s_requirement, UI_VIEW_WAVE_3PERIOD);
+        }
         return 1U;
     }
     if (strcmp(token, "UI:PAGE:SPECTRUM") == 0) {
-        GSignal_Request(s_requirement, UI_VIEW_SPECTRUM);
+        if (s_requirement == UI_REQUIREMENT_U) {
+            GSignalU_Request(s_requirement, UI_VIEW_SPECTRUM);
+        } else {
+            GSignal_Request(s_requirement, UI_VIEW_SPECTRUM);
+        }
         return 1U;
     }
 

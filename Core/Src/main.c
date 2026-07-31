@@ -32,6 +32,7 @@
 #include "screen_protocol.h"
 #include "ui_controller.h"
 #include "g_signal_measurement.h"
+#include "g_signal_u.h"
 #include "g_signal_pc_debug.h"
 /* USER CODE END Includes */
 
@@ -144,6 +145,11 @@ int main(void)
   if (GSignal_Init(&htim1) != HAL_OK)
   {
     HAL_UART_Transmit(&huart1, (uint8_t *)"GSIGNAL_INIT_FAIL\r\n", 19, 100);
+    Error_Handler();
+  }
+  if (GSignalU_Init(&htim1) != HAL_OK)
+  {
+    HAL_UART_Transmit(&huart1, (uint8_t *)"GSIGNALU_INIT_FAIL\r\n", 20, 100);
     Error_Handler();
   }
   HAL_UART_Transmit(&huart1, (uint8_t *)"GSIGNAL_INIT_OK\r\n", 17, 100);

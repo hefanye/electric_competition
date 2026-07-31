@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "usart.h"
 #include "g_signal_measurement.h"
+#include "g_signal_u.h"
 #include "ad9226_debug_nogain.h"
 /* USER CODE END Includes */
 
@@ -291,10 +292,15 @@ void DMA2_Stream0_IRQHandler(void)
 void DMA2_Stream5_IRQHandler(void)
 {
   /* AD9226 DMA 模式下由 AD9226_DMA_IRQHandler 处理；
-   * G_SIGNAL 模式下由 GSignal_DMA2_Stream5_IRQHandler 处理。
-   * 两者互斥（不会同时使能），都调用不会冲突。 */
+   * G_SIGNAL 一二题模式（4MHz）由 GSignal_DMA2_Stream5_IRQHandler 处理；
+   * G_SIGNAL_U 第三题模式（10.5MHz）由 GSignalU_DMA2_Stream5_IRQHandler 处理。
+   * 三者互斥（不会同时使能），按当前采样率分发，避免清标志冲突。 */
   AD9226_DMA_IRQHandler();
-  GSignal_DMA2_Stream5_IRQHandler();
+  if (GSignal_GetSampleRate() == G_SIGNAL_SAMPLE_RATE_10M_HZ) {
+      GSignalU_DMA2_Stream5_IRQHandler();
+  } else {
+      GSignal_DMA2_Stream5_IRQHandler();
+  }
 }
 
 /* USER CODE BEGIN 1 */

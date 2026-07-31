@@ -21,6 +21,11 @@ void UI_Display_SetStatus(const char *text)
     Screen_SendText(UI_HMI_STATUS_TEXT, text);
 }
 
+void UI_Display_SetMenuConfig(const char *text)
+{
+    Screen_SendText(UI_HMI_MENU_CONFIG_TEXT, text);
+}
+
 void UI_Display_ShowRequirementAt(const char *control, ui_requirement_t requirement)
 {
     /* TJC dynamic text uses its configured byte encoding.  Keep this status

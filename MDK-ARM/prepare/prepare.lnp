@@ -23,6 +23,7 @@
 "prepare\g_signal_measurement.o"
 "prepare\ad9226_debug_nogain.o"
 "prepare\g_signal_pc_debug.o"
+"prepare\g_signal_u.o"
 "prepare\adc_internal_debug.o"
 "prepare\nrf24l01.o"
 "prepare\nrf_bridge.o"

@@ -11,20 +11,21 @@
 #include <stdio.h>
 #include <string.h>
 
-#define G_SIGNAL_DISCARD_SAMPLES  8U
-#define G_SIGNAL_DMA_SAMPLES      (G_SIGNAL_FRAME_SAMPLES + G_SIGNAL_DISCARD_SAMPLES)
-#define G_SIGNAL_BIN_COUNT        (G_SIGNAL_FRAME_SAMPLES / 2U + 1U)
-
 static TIM_HandleTypeDef *s_htim;
 static volatile uint8_t s_busy;
 static volatile uint8_t s_frame_ready;
 static volatile uint8_t s_dma_fault;
 static ui_requirement_t s_requirement;
 static ui_view_t s_view;
+/* 当前采样率（Hz）：4MHz（一二题）或 10.5MHz（第三题抗干扰）。
+ * 由 GSignal_SetSampleRate() 维护，供 analyse_frame 选择处理流程。 */
+static uint32_t s_sample_rate_hz = G_SIGNAL_SAMPLE_RATE_HZ;
 
 static uint16_t s_raw[G_SIGNAL_DMA_SAMPLES];
-static sp_complex_f32_t s_fft[G_SIGNAL_FRAME_SAMPLES];
-static float s_magnitude[G_SIGNAL_BIN_COUNT];
+/* s_fft/s_magnitude 导出供 g_signal_u.c 共享（两模块互斥使用，不会同时访问）。
+ * U 模块用前 2048/1025 个元素做 2048 点 FFT，节省独立缓冲的 20KB 主 SRAM。 */
+sp_complex_f32_t s_fft[G_SIGNAL_FRAME_SAMPLES];
+float s_magnitude[G_SIGNAL_BIN_COUNT];
 static uint8_t s_wave_one[UI_HMI_WAVE_PLOT_POINTS];
 static uint8_t s_wave_three[UI_HMI_WAVE_PLOT_POINTS];
 static uint8_t s_spectrum[UI_HMI_SPECTRUM_PLOT_POINTS];
@@ -43,7 +44,8 @@ static uint8_t s_avg_filled;
  *   AD0(MSB)→PE15  AD1→PE14  AD2→PE13  AD3→PE12  AD4→PE11  AD5→PE10
  *   AD6→PE9         AD7→PE8   AD8→PE7   AD9→PE5   AD10→PE6  AD11(LSB)→PE3
  * 直接传入 IDR 原始值，无需外部先做 & 0x0FFF。 */
-static uint16_t remap_ad9226(uint16_t idr)
+/* 导出供 g_signal_u.c 共享（第三题抗干扰模式） */
+uint16_t remap_ad9226(uint16_t idr)
 {
     uint16_t r = 0U;
     if (idr & 0x8000U) r |= 0x0800U;  /* AD0  PE15 → bit11 (MSB) */
@@ -61,7 +63,7 @@ static uint16_t remap_ad9226(uint16_t idr)
     return r;
 }
 
-static float code_to_input_voltage(uint16_t code)
+float code_to_input_voltage(uint16_t code)
 {
     /* Module manual: D = 2048 - Vin * 2048 / 5.  Divide by front-end gain. */
     return ((2048.0f - (float)code) * 5.0f / 2048.0f) / G_SIGNAL_INPUT_GAIN;
@@ -85,15 +87,12 @@ static uint8_t scale_to_u8(float value, float minimum, float maximum)
  * 构造法方程 (XᵀX)·β = Xᵀx，高斯消元解 (2K+1)×(2K+1) 线性方程组。
  * 避免 FFT 单 bin 读幅值的频谱泄漏问题，精度从 5mV 提升到 2.5mV。
  * 无需硬件放大即可在小信号下精确提取幅值。 */
-#define FIT_MAX_HARMONICS   3U
-#define FIT_MATRIX_DIM      (2U * FIT_MAX_HARMONICS + 1U)  /* 7×7 */
-
 static float s_fit_matrix[FIT_MATRIX_DIM * FIT_MATRIX_DIM];
 static float s_fit_vector[FIT_MATRIX_DIM];
 static float s_fit_beta[FIT_MATRIX_DIM];
 
 /* 高斯消元法解线性方程组 A·x = b，n 维。带部分主元选择。 */
-static uint8_t solve_linear_system(float *A, float *b, float *x, uint32_t n)
+uint8_t solve_linear_system(float *A, float *b, float *x, uint32_t n)
 {
     uint32_t col, row, pivot, elim;
     for (col = 0U; col < n; ++col) {
@@ -188,8 +187,8 @@ static uint32_t get_band_fit_length(freq_band_t band)
 #define FREQ_REFINE_ITERATIONS_MAX  15U
 #define FREQ_REFINE_CONVERGE_HZ     0.5f
 
-static float refine_frequency(const uint16_t *raw, uint32_t length,
-                              float sample_rate, float freq_init)
+float refine_frequency(const uint16_t *raw, uint32_t length,
+                       float sample_rate, float freq_init)
 {
     float freq = freq_init;
     float freq_min = freq_init * 0.9f;
@@ -265,9 +264,9 @@ static float refine_frequency(const uint16_t *raw, uint32_t length,
  *       fit 按实际真峰数拟合，不硬塞假峰，避免矩阵奇异。
  * 抛物线插值精化频率和幅值。
  * 返回值：真峰个数（1~3）。 */
-static uint32_t find_top3_peaks(float freq_out[3], float amp_out[3])
+uint32_t find_top3_peaks(float freq_out[3], float amp_out[3])
 {
-    const float bin_freq = (float)G_SIGNAL_SAMPLE_RATE_HZ / (float)G_SIGNAL_FRAME_SAMPLES;
+    const float bin_freq = (float)s_sample_rate_hz / (float)G_SIGNAL_FRAME_SAMPLES;
     uint32_t rank, bin, r2;
     uint32_t selected[3] = { 0U, 0U, 0U };
     float raw_amp[3] = { 0.0f, 0.0f, 0.0f };
@@ -347,14 +346,14 @@ static uint32_t find_top3_peaks(float freq_out[3], float amp_out[3])
  * 内部直接从码值转换电压，无需额外 float 缓冲区（省 32KB SRAM）。
  * beta_out 输出 [d, a1, b1, a2, b2, a3, b3] 供波形重建使用。
  * freq_in[0]=基波频率，freq_in[1/2]=谐波频率（任意次数，不假设 2/3 次）。 */
-static float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
-                                   float sample_rate,
-                                   const float freq_in[3],
-                                   uint32_t harmonics_count,
-                                   float *fund_freq_out,
-                                   float harmonics_freq[3],
-                                   float harmonics_amp[3],
-                                   float beta_out[FIT_MATRIX_DIM])
+float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
+                            float sample_rate,
+                            const float freq_in[3],
+                            uint32_t harmonics_count,
+                            float *fund_freq_out,
+                            float harmonics_freq[3],
+                            float harmonics_amp[3],
+                            float beta_out[FIT_MATRIX_DIM])
 {
     uint32_t n, k, row, col;
     float omega[FIT_MAX_HARMONICS];
@@ -549,11 +548,11 @@ static void build_spectrum(float *maximum_amplitude, float fundamental_freq)
      * 新版 10kHz 基波 → 显示 0~100kHz，10k 在 point 25，20k 在 point 51，清晰分离。
      * 500kHz 基波 → 显示 0~2MHz（Nyquist 上限），500k 在 point 64，1M 在 point 128。 */
     float display_max_freq = fundamental_freq * 10.0f;
-    float nyquist = (float)G_SIGNAL_SAMPLE_RATE_HZ * 0.5f;
+    float nyquist = (float)s_sample_rate_hz * 0.5f;
     uint32_t max_bin;
     if (display_max_freq > nyquist) display_max_freq = nyquist;
     if (display_max_freq < 50000.0f) display_max_freq = 50000.0f;  /* 最小 50kHz */
-    max_bin = (uint32_t)(display_max_freq / (float)G_SIGNAL_SAMPLE_RATE_HZ *
+    max_bin = (uint32_t)(display_max_freq / (float)s_sample_rate_hz *
                          (float)G_SIGNAL_FRAME_SAMPLES);
     if (max_bin < 10U) max_bin = 10U;
     if (max_bin > G_SIGNAL_BIN_COUNT - 1U) max_bin = G_SIGNAL_BIN_COUNT - 1U;
@@ -678,7 +677,7 @@ static void analyse_frame(void)
         s_magnitude[i] = amplitude;
     }
     (void)spectrum_find_peak_f32(s_magnitude, G_SIGNAL_BIN_COUNT,
-                                 (float)G_SIGNAL_SAMPLE_RATE_HZ, G_SIGNAL_FRAME_SAMPLES,
+                                 (float)s_sample_rate_hz, G_SIGNAL_FRAME_SAMPLES,
                                  1U, G_SIGNAL_BIN_COUNT - 2U, &fundamental);
 
     /* 2.5 找真峰（按幅度降序，最强=基波）。
@@ -698,7 +697,7 @@ static void analyse_frame(void)
      *    精化后 8192 点相位累积 < 0.013rad，可忽略，不影响幅值拟合。 */
     fundamental.frequency_hz = refine_frequency(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
                                                 G_SIGNAL_FRAME_SAMPLES,
-                                                (float)G_SIGNAL_SAMPLE_RATE_HZ,
+                                                (float)s_sample_rate_hz,
                                                 fundamental.frequency_hz);
 
     /* 基波用精化值；真谐波 = 精化基波 × 谐波次数（严格倍数）。
@@ -734,7 +733,7 @@ static void analyse_frame(void)
         }
         fit_upp_mV = fit_multisine_and_upp(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
                                            fit_length,
-                                           (float)G_SIGNAL_SAMPLE_RATE_HZ,
+                                           (float)s_sample_rate_hz,
                                            harm_freq,
                                            real_peak_count,
                                            &fit_freq, harm_freq, harm_amp, fit_beta);
@@ -831,6 +830,39 @@ static void analyse_frame(void)
     UI_Display_SetStatus("READY");
 }
 
+/* 动态切换 TIM1 采样率：use_10m=1 切到 10.5MHz（第三题），=0 切回 4MHz（一二题）。
+ * 只更新 s_sample_rate_hz 标志，实际 ARR/CCR1 在 GSignal_Request 启动时根据
+ * 该标志写入。若采集进行中（s_busy=1）先强制停止 DMA 和 TIM1，确保安全切换。
+ * 同时清空 8 帧环形缓冲，避免上一模式的数据残留污染下一模式的平均值
+ * （例如 U 模式采集后切回 Ua，若信号频率接近，突变检测不触发，
+ *  缓冲里的 10.5MHz 数据会与 4MHz 新数据混合，导致结果错误）。
+ * 返回切换后的实际采样率（Hz）。 */
+uint32_t GSignal_SetSampleRate(uint8_t use_10m)
+{
+    if (s_htim == NULL) {
+        return s_sample_rate_hz;
+    }
+    /* 若采集进行中，强制停止 DMA 和 TIM1，清 s_busy */
+    if (s_busy != 0U) {
+        DMA2_Stream5->CR &= ~DMA_SxCR_EN;
+        while ((DMA2_Stream5->CR & DMA_SxCR_EN) != 0U) { }
+        __HAL_TIM_DISABLE(s_htim);
+        s_busy = 0U;
+    }
+    __HAL_TIM_DISABLE(s_htim);
+    /* 清空环形缓冲，防止上一模式数据残留 */
+    s_avg_index = 0U;
+    s_avg_filled = 0U;
+    s_sample_rate_hz = (use_10m != 0U) ? G_SIGNAL_SAMPLE_RATE_10M_HZ
+                                       : G_SIGNAL_SAMPLE_RATE_HZ;
+    return s_sample_rate_hz;
+}
+
+uint32_t GSignal_GetSampleRate(void)
+{
+    return s_sample_rate_hz;
+}
+
 HAL_StatusTypeDef GSignal_Init(TIM_HandleTypeDef *htim)
 {
     if (htim == NULL || htim->Instance != TIM1) return HAL_ERROR;
@@ -871,6 +903,20 @@ void GSignal_Request(ui_requirement_t requirement, ui_view_t view)
                        DMA_SxCR_TCIE | DMA_SxCR_TEIE;
     DMA2_Stream5->CR |= DMA_SxCR_EN;
     __HAL_TIM_SET_COUNTER(s_htim, 0U);
+    /* 先配置 ARR/CCR1 再启动 PWM，避免 HAL_TIM_PWM_Start 内部 __HAL_TIM_ENABLE
+     * 后用错误 ARR 计数。关闭 ARPE 预装载，ARR/CCR1 立即生效。
+     * 4MHz 模式：ARR=41, CCR1=21 → 2MHz 方波
+     * 10.5MHz 模式：ARR=15, CCR1=8 → 5.25MHz 方波
+     * 若 U 模式下 CCR1=21 > ARR=15，PWM 输出常高，ADC 无时钟，必须调整。 */
+    __HAL_TIM_DISABLE(s_htim);
+    s_htim->Instance->CR1 &= ~TIM_CR1_ARPE;
+    if (s_sample_rate_hz == G_SIGNAL_SAMPLE_RATE_10M_HZ) {
+        __HAL_TIM_SET_AUTORELOAD(s_htim, G_SIGNAL_TIM1_ARR_10M);
+        __HAL_TIM_SET_COMPARE(s_htim, TIM_CHANNEL_1, 8U);
+    } else {
+        __HAL_TIM_SET_AUTORELOAD(s_htim, G_SIGNAL_TIM1_ARR_4M);
+        __HAL_TIM_SET_COMPARE(s_htim, TIM_CHANNEL_1, 21U);
+    }
     (void)HAL_TIM_PWM_Start(s_htim, TIM_CHANNEL_1);
     /* TIM1 高级定时器必须使能 BDTR.MOE 才能输出 PWM 到 PA8（ACLK） */
     TIM1->BDTR |= TIM_BDTR_MOE;

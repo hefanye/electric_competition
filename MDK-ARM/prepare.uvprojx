@@ -530,6 +530,11 @@
               <FileType>1</FileType>
               <FilePath>../User/g_signal_pc_debug.c</FilePath>
             </File>
+            <File>
+              <FileName>g_signal_u.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../User/g_signal_u.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

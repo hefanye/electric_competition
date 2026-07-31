@@ -5,6 +5,8 @@
 #define UI_HMI_STATUS_TEXT             "tsta"
 /* p_menu: selected Ua / Ub / U requirement label. */
 #define UI_HMI_MENU_REQUIREMENT_TEXT   "t_menu_req"
+/* p_menu: 采样率配置状态标签（4M OK / 10M OK / FAIL）。 */
+#define UI_HMI_MENU_CONFIG_TEXT        "t_menu_cfg"
 /* p_wave_select: selected Ua / Ub / U requirement label. */
 #define UI_HMI_WAVE_SELECT_REQUIREMENT_TEXT "t_ws_req"
 #define UI_HMI_WAVE1_UPP_TEXT          "t_w1_upp"
