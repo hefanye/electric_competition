@@ -5,6 +5,7 @@
 #include "ui_hmi_map.h"
 #include "spectrum_analysis.h"
 #include "g_signal_pc_debug.h"
+#include "usart.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -35,15 +36,29 @@ static float s_freq_history[AVG_FRAME_COUNT];
 static uint8_t s_avg_index;
 static uint8_t s_avg_filled;
 
-static uint16_t reverse12(uint16_t value)
+/* AD9226 数据位重映射（PCB布局优化版，引脚位序不连续）
+ * DMA 读取 GPIOE->IDR 全16位，12根数据线散布在 bit3/5~15，需按下表
+ * 提取并组合为连续12位码值。AD9226 的 AD0=MSB、AD11=LSB，故
+ * AD0→bit11(MSB) ... AD11→bit0(LSB)（与原 reverse12 输出位序一致）：
+ *   AD0(MSB)→PE15  AD1→PE14  AD2→PE13  AD3→PE12  AD4→PE11  AD5→PE10
+ *   AD6→PE9         AD7→PE8   AD8→PE7   AD9→PE5   AD10→PE6  AD11(LSB)→PE3
+ * 直接传入 IDR 原始值，无需外部先做 & 0x0FFF。 */
+static uint16_t remap_ad9226(uint16_t idr)
 {
-    uint16_t result = 0U;
-    uint8_t bit;
-    for (bit = 0U; bit < 12U; ++bit) {
-        result = (uint16_t)((result << 1U) | (value & 1U));
-        value >>= 1U;
-    }
-    return result;
+    uint16_t r = 0U;
+    if (idr & 0x8000U) r |= 0x0800U;  /* AD0  PE15 → bit11 (MSB) */
+    if (idr & 0x4000U) r |= 0x0400U;  /* AD1  PE14 → bit10 */
+    if (idr & 0x2000U) r |= 0x0200U;  /* AD2  PE13 → bit9  */
+    if (idr & 0x1000U) r |= 0x0100U;  /* AD3  PE12 → bit8  */
+    if (idr & 0x0800U) r |= 0x0080U;  /* AD4  PE11 → bit7  */
+    if (idr & 0x0400U) r |= 0x0040U;  /* AD5  PE10 → bit6  */
+    if (idr & 0x0200U) r |= 0x0020U;  /* AD6  PE9  → bit5  */
+    if (idr & 0x0100U) r |= 0x0010U;  /* AD7  PE8  → bit4  */
+    if (idr & 0x0080U) r |= 0x0008U;  /* AD8  PE7  → bit3  */
+    if (idr & 0x0020U) r |= 0x0004U;  /* AD9  PE5  → bit2  */
+    if (idr & 0x0040U) r |= 0x0002U;  /* AD10 PE6  → bit1  */
+    if (idr & 0x0008U) r |= 0x0001U;  /* AD11 PE3  → bit0 (LSB) */
+    return r;
 }
 
 static float code_to_input_voltage(uint16_t code)
@@ -124,13 +139,50 @@ static uint8_t solve_linear_system(float *A, float *b, float *x, uint32_t n)
     return 1U;
 }
 
+/* ===== 频段划分（仅用于幅值拟合参数，频率精化统一用最精密算法）=====
+ * 调试策略：一个频段一个频段调，调好后参数固定，再调下一个频段。
+ *
+ * 频段划分（基于赛题 50kHz~500kHz 范围）：
+ *   LOW  (<100kHz)  ：每周期 40+ 点，拟合精度好
+ *   MID  (100k~300k) ：每周期 13~40 点
+ *   HIGH (>300kHz)  ：每周期 8~13 点，相位累积敏感
+ *
+ * 初始状态：所有频段都用 v3-release 验证参数（8192 点），等效于 v3-release。
+ * 调试时逐个频段调整 fit_length，找到该频段最优参数后固定。 */
+typedef enum {
+    FREQ_BAND_LOW,      /* <100kHz */
+    FREQ_BAND_MID,      /* 100k~300kHz */
+    FREQ_BAND_HIGH      /* >300kHz */
+} freq_band_t;
+
+static freq_band_t get_freq_band(float freq_hz)
+{
+    if (freq_hz < 100000.0f) return FREQ_BAND_LOW;
+    if (freq_hz < 300000.0f) return FREQ_BAND_MID;
+    return FREQ_BAND_HIGH;
+}
+
+/* 根据频段获取幅值拟合点数
+ * 理论依据：fit_length(N) 平衡相位累积误差(∝N·Δf)与量化噪声(∝1/√N)
+ *   HIGH(>300k): Δf≈150Hz, N=512 时 θ=0.12rad 误差0.04mV（最优）
+ *   MID/LOW: 暂用8192，逐频段调试时再调整 */
+static uint32_t get_band_fit_length(freq_band_t band)
+{
+    switch (band) {
+        case FREQ_BAND_LOW:   return 8192U;  /* 待调 */
+        case FREQ_BAND_MID:   return 8192U;  /* 待调 */
+        case FREQ_BAND_HIGH:  return 512U;   /* HIGH已调：512点 */
+        default:              return 8192U;
+    }
+}
+
 /* ===== 频率精化（3 参数高斯-牛顿迭代，IEEE 1057）=====
  * 模型 x[n] = d + a·cos(ωn) + b·sin(ωn)，ω=2πf/fs
  * 高斯-牛顿迭代：每轮先 3×3 法方程解 [d,a,b]，再用残差梯度修正频率。
  * - FFT 抛物线插值精度 0.1bin≈49Hz，精化后 <1Hz
  * - Upp 拟合精度从 ±5mV 提升到 ±1mV（频率偏差会污染 a1/b1 系数）
  * 3×3 矩阵条件数好，全频段稳定收敛不发散。
- * 15 次迭代 + 0.5Hz 收敛门限（单步修正<0.5Hz 立即退出，省时）。
+ * 15 次迭代 + 0.5Hz 收敛门限（v3-release 验证参数，全频段精度 ±1mV）。
  * 频率修正限制 ±10% 防发散。
  * 参考：梁志国等《四参数正弦波曲线拟合的快速算法》计量学报2006 */
 #define FREQ_REFINE_ITERATIONS_MAX  15U
@@ -160,7 +212,7 @@ static float refine_frequency(const uint16_t *raw, uint32_t length,
             float phi = omega * (float)n;
             float c = cosf(phi);
             float s = sinf(phi);
-            float x = code_to_input_voltage(reverse12((uint16_t)(raw[n] & 0x0FFFU)));
+            float x = code_to_input_voltage(remap_ad9226(raw[n]));
             A[0] += 1.0f;                                /* DC·DC */
             A[1] += c;                A[3] += c;         /* DC·cos */
             A[2] += s;                A[6] += s;         /* DC·sin */
@@ -183,7 +235,7 @@ static float refine_frequency(const uint16_t *raw, uint32_t length,
             float phi = omega * (float)n;
             float c = cosf(phi);
             float s = sinf(phi);
-            float x = code_to_input_voltage(reverse12((uint16_t)(raw[n] & 0x0FFFU)));
+            float x = code_to_input_voltage(remap_ad9226(raw[n]));
             float model = beta3[0] + a_coef * c + b_coef * s;
             float residual = x - model;
             float dm_df = (-a_coef * s + b_coef * c) * (float)n * two_pi_over_fs;
@@ -339,7 +391,7 @@ static float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
         float cosv[FIT_MAX_HARMONICS];
         float sinv[FIT_MAX_HARMONICS];
         float row_vec[FIT_MATRIX_DIM];
-        float x = code_to_input_voltage(reverse12((uint16_t)(raw[n] & 0x0FFFU)));
+        float x = code_to_input_voltage(remap_ad9226(raw[n]));
 
         row_vec[0] = 1.0f;
         for (k = 0U; k < FIT_MAX_HARMONICS; ++k) {
@@ -594,7 +646,7 @@ static void analyse_frame(void)
     /* 1. 预处理：统计 min/max/sum2 用于 Urms 计算（max-min 仅作 fallback）。
      *    不缓存电压数组（省 32KB SRAM），fit 函数内部直接从 raw 转换。 */
     for (i = 0U; i < G_SIGNAL_FRAME_SAMPLES; ++i) {
-        float value = code_to_input_voltage(reverse12((uint16_t)(s_raw[i + G_SIGNAL_DISCARD_SAMPLES] & 0x0FFFU)));
+        float value = code_to_input_voltage(remap_ad9226(s_raw[i + G_SIGNAL_DISCARD_SAMPLES]));
         if (value < minimum) minimum = value;
         if (value > maximum) maximum = value;
         sum2 += value * value;
@@ -607,7 +659,7 @@ static void analyse_frame(void)
                                       &coherent_gain);
     if (coherent_gain <= 0.0f) coherent_gain = 1.0f;
     for (i = 0U; i < G_SIGNAL_FRAME_SAMPLES; ++i) {
-        float value = code_to_input_voltage(reverse12((uint16_t)(s_raw[i + G_SIGNAL_DISCARD_SAMPLES] & 0x0FFFU)));
+        float value = code_to_input_voltage(remap_ad9226(s_raw[i + G_SIGNAL_DISCARD_SAMPLES]));
         float coefficient = 1.0f;
         (void)sp_window_coefficient_f32(SP_WINDOW_HANN,
                                         i,
@@ -638,18 +690,17 @@ static void analyse_frame(void)
     real_peak_count = find_top3_peaks(harm_freq, harm_amp);
     fundamental.frequency_hz = harm_freq[0];  /* 基波 = 最强峰 */
 
-    /* 3. 频率精化（IEEE 1057，3 参数高斯-牛顿迭代）。
-     *    FFT 抛物线插值精度 0.1bin≈49Hz，精化后 <1Hz。
-     *    这是 Upp 精度的关键：频率偏差会让 8192 点累积相位偏移，
-     *    污染 a1/b1 系数，Upp 误差从 ±1mV 恶化到 ±5mV 以上。
-     *    精化后 Upp 误差回到 ±1mV（赛题要求 ≤5mV，5 倍余量）。 */
+    /* 3. 频率精化（IEEE 1057，3 参数高斯-牛顿迭代）—— 统一最精密算法。
+     *    频率精化是幅值拟合的基础，不分频段，统一用 8192 点全点。
+     *    v3-release 验证参数：15 次迭代 + 0.5Hz 门限，精化后频率偏差 < 1Hz。
+     *    精化后 8192 点相位累积 < 0.013rad，可忽略，不影响幅值拟合。 */
     fundamental.frequency_hz = refine_frequency(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
                                                 G_SIGNAL_FRAME_SAMPLES,
                                                 (float)G_SIGNAL_SAMPLE_RATE_HZ,
                                                 fundamental.frequency_hz);
-    /* 基波用精化值；真谐波 = 精化基波 × 谐波次数（严格倍数，跟旧版 28e5304 一样精度）。
-     * 谐波次数 = FFT 峰值频率 ÷ 基波 FFT 峰值频率 四舍五入，支持 2/3/4 次任意谐波。
-     * 不用 FFT 峰值频率，避免 ±49Hz 误差通过法方程耦合污染基波系数。 */
+
+    /* 基波用精化值；真谐波 = 精化基波 × 谐波次数（严格倍数）。
+     * 谐波次数 = FFT 峰值频率 ÷ 基波 FFT 峰值频率 四舍五入，支持 2/3/4 次任意谐波。 */
     {
         float fund_refined = fundamental.frequency_hz;
         float fund_fft = harm_freq[0];  /* 精化前的基波 FFT 频率 */
@@ -658,21 +709,24 @@ static void analyse_frame(void)
         for (k = 1U; k < real_peak_count; ++k) {
             float ratio = harm_freq[k] / fund_fft;
             uint32_t harmonic_order = (uint32_t)(ratio + 0.5f);
-            if (harmonic_order < 2U) harmonic_order = 2U;  /* 保护 */
+            if (harmonic_order < 2U) harmonic_order = 2U;
             harm_freq[k] = fund_refined * (float)harmonic_order;
         }
     }
 
-    /* 4. 多正弦最小二乘拟合：按实际真峰数提取基波和谐波幅值。
-     *    支持任意次谐波（2/3/4 次等），不再硬编码 2次/3次。
-     *    避免 FFT 频谱泄漏，小信号下精度从 5mV 提升到 0.5mV。
-     *    fit 只对真峰拟合，未用谐波槽位不参与法方程，避免矩阵奇异。 */
-    fit_upp_mV = fit_multisine_and_upp(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
-                                       G_SIGNAL_FRAME_SAMPLES,
-                                       (float)G_SIGNAL_SAMPLE_RATE_HZ,
-                                       harm_freq,
-                                       real_peak_count,
-                                       &fit_freq, harm_freq, harm_amp, fit_beta);
+    /* 4. 多正弦最小二乘拟合：分频段参数，逐频段调试。
+     *    频率已精化到位（偏差<1Hz），幅值拟合用分频段的 fit_length。
+     *    初始全部 8192（v3-release 等效），逐频段调优后固定。 */
+    {
+        freq_band_t band = get_freq_band(fundamental.frequency_hz);
+        uint32_t fit_length = get_band_fit_length(band);
+        fit_upp_mV = fit_multisine_and_upp(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
+                                           fit_length,
+                                           (float)G_SIGNAL_SAMPLE_RATE_HZ,
+                                           harm_freq,
+                                           real_peak_count,
+                                           &fit_freq, harm_freq, harm_amp, fit_beta);
+    }
 
     /* 5. 8 帧环形缓冲平均 + 突变检测。
      *    正常情况下平均 8 帧提升精度（×√8≈2.8）；
