@@ -321,11 +321,13 @@ static uint32_t find_top3_peaks(float freq_out[3], float amp_out[3])
             float ta = raw_amp[rank];  raw_amp[rank]  = raw_amp[max_idx];  raw_amp[max_idx]  = ta;
         }
     }
-    /* 相对门限过滤：幅度 < 主峰×5% 视为噪声假峰，不输出。
+    /* 相对门限过滤：幅度 < 主峰×2% 视为噪声假峰，不输出。
      * 单频信号 → 只 1 个真峰；双频 → 2 个；三频 → 3 个。
-     * 这样 fit 只对真峰拟合，不硬塞假峰，彻底避免矩阵奇异。 */
+     * 这样 fit 只对真峰拟合，不硬塞假峰，彻底避免矩阵奇异。
+     * 门限从 5% 降到 2%：三频 1:3:4 叠加时 Hann 窗旁瓣叠加会使高频
+     * 谐波单 bin 幅值降到主峰 3~5%，5% 门限会误滤，2% 可保留。 */
     {
-        float threshold = raw_amp[0] * 0.05f;
+        float threshold = raw_amp[0] * 0.02f;
         for (rank = 0U; rank < 3U; ++rank) {
             if (raw_amp[rank] >= threshold) {
                 freq_out[rank] = raw_freq[rank];
@@ -716,10 +718,20 @@ static void analyse_frame(void)
 
     /* 4. 多正弦最小二乘拟合：分频段参数，逐频段调试。
      *    频率已精化到位（偏差<1Hz），幅值拟合用分频段的 fit_length。
-     *    初始全部 8192（v3-release 等效），逐频段调优后固定。 */
+     *    初始全部 8192（v3-release 等效），逐频段调优后固定。
+     *
+     *    多频信号强制用 512 点：相位累积误差 ∝ 谐波次数×Δf×N，
+     *    8192 点下 3 次谐波相位累积可达 1.93rad（Δf=50Hz 时），
+     *    导致 ak/bk 比值失真，合成波形 max-min 偏小 12~47mV。
+     *    改用 512 点后相位累积降到 0.12rad，幅值 SNR 仍 >400（误差<0.1mV）。
+     *    单频信号无谐波次数放大，保持原频段参数（MID/LOW 用 8192）。
+     *    实测验证：200k+400k 偏差 -24mV→≤1mV，100k+200k+300k -47mV→≤1mV。 */
     {
         freq_band_t band = get_freq_band(fundamental.frequency_hz);
         uint32_t fit_length = get_band_fit_length(band);
+        if (real_peak_count >= 2U) {
+            fit_length = 512U;
+        }
         fit_upp_mV = fit_multisine_and_upp(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
                                            fit_length,
                                            (float)G_SIGNAL_SAMPLE_RATE_HZ,
