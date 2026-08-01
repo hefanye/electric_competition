@@ -97,19 +97,24 @@ static float fit_voltage_u(const float *voltage, uint32_t length,
         }
     }
 
-    for (n = 0U; n < length; ++n) {
-        float row_vec[FIT_MATRIX_DIM];
-        float x = voltage[n];
-        row_vec[0] = 1.0f;
-        for (k = 0U; k < FIT_MAX_HARMONICS; ++k) {
-            row_vec[1U + 2U * k] = 0.0f;
-            row_vec[2U + 2U * k] = 0.0f;
-        }
-        for (k = 0U; k < harmonics_count; ++k) {
-            float phi = omega[k] * (float)n;
-            row_vec[1U + 2U * k] = cosf(phi);
-            row_vec[2U + 2U * k] = sinf(phi);
-        }
+    /* 相位用累加 phi += omega + 模2π归一化，避免 omega*n 大数乘法精度损失 */
+    {
+        const float two_pi = 2.0f * 3.14159265358979f;
+        float phi_acc[FIT_MAX_HARMONICS] = { 0.0f, 0.0f, 0.0f };
+        for (n = 0U; n < length; ++n) {
+            float row_vec[FIT_MATRIX_DIM];
+            float x = voltage[n];
+            row_vec[0] = 1.0f;
+            for (k = 0U; k < FIT_MAX_HARMONICS; ++k) {
+                row_vec[1U + 2U * k] = 0.0f;
+                row_vec[2U + 2U * k] = 0.0f;
+            }
+            for (k = 0U; k < harmonics_count; ++k) {
+                phi_acc[k] += omega[k];
+                if (phi_acc[k] >= two_pi) phi_acc[k] -= two_pi;
+                row_vec[1U + 2U * k] = cosf(phi_acc[k]);
+                row_vec[2U + 2U * k] = sinf(phi_acc[k]);
+            }
         for (row = 0U; row < dim; ++row) {
             if (row > 2U * harmonics_count) continue;
             s_fit_vector_u[row] += row_vec[row] * x;
@@ -122,6 +127,7 @@ static float fit_voltage_u(const float *voltage, uint32_t length,
                 }
             }
         }
+    }
     }
 
     for (k = harmonics_count; k < FIT_MAX_HARMONICS; ++k) {
@@ -262,6 +268,17 @@ static uint32_t find_top3_peaks_u(float freq_out[3], float amp_out[3])
             } else {
                 break;
             }
+        }
+    }
+    /* 按频率升序排列（最低频=基波），和一二题一致，支持任意频率组合。 */
+    for (rank = 0U; rank + 1U < real_count; ++rank) {
+        uint32_t min_idx = rank;
+        for (r2 = rank + 1U; r2 < real_count; ++r2) {
+            if (freq_out[r2] < freq_out[min_idx]) min_idx = r2;
+        }
+        if (min_idx != rank) {
+            float tf = freq_out[rank]; freq_out[rank] = freq_out[min_idx]; freq_out[min_idx] = tf;
+            float ta = amp_out[rank];  amp_out[rank]  = amp_out[min_idx];  amp_out[min_idx]  = ta;
         }
     }
     return real_count;
@@ -461,26 +478,19 @@ static void analyse_frame_u(void)
     fundamental.frequency_hz = harm_freq[0];
 
     /* 5. 频率精化（IEEE 1057，在原始 raw 上，干扰正交不影响）
+     *    对所有真峰都精化（与一二题一致），避免谐波频率误差导致拟合不稳定。
      *    U 模式用 2048 点全点精化，bin 分辨率 5.13kHz，
      *    精化后频率偏差 <1Hz，拟合精度有保障。 */
-    fundamental.frequency_hz = refine_frequency(&s_raw_u[G_SIGNAL_DISCARD_SAMPLES],
-                                                G_SIGNALU_FRAME_SAMPLES,
-                                                (float)G_SIGNALU_SAMPLE_RATE_HZ,
-                                                fundamental.frequency_hz);
-
-    /* 谐波频率 = 精化基波 × 谐波次数（和一二题一致） */
     {
-        float fund_refined = fundamental.frequency_hz;
-        float fund_fft = harm_freq[0];
-        uint32_t k;
-        harm_freq[0] = fund_refined;
-        for (k = 1U; k < real_peak_count; ++k) {
-            float ratio = harm_freq[k] / fund_fft;
-            uint32_t harmonic_order = (uint32_t)(ratio + 0.5f);
-            if (harmonic_order < 2U) harmonic_order = 2U;
-            harm_freq[k] = fund_refined * (float)harmonic_order;
+        uint32_t pk;
+        for (pk = 0U; pk < real_peak_count; ++pk) {
+            harm_freq[pk] = refine_frequency(&s_raw_u[G_SIGNAL_DISCARD_SAMPLES],
+                                             G_SIGNALU_FRAME_SAMPLES,
+                                             (float)G_SIGNALU_SAMPLE_RATE_HZ,
+                                             harm_freq[pk]);
         }
     }
+    fundamental.frequency_hz = harm_freq[0];
 
     /* 6. 未加窗 FFT → 完整陷波（正负频率）→ IFFT → 干净时域电压。
      *    关键：不能用步骤 2 的加窗 s_fft 做 IFFT！加窗后 IFFT 恢复的是 w(t)·signal(t)，
@@ -516,7 +526,10 @@ static void analyse_frame_u(void)
                                real_peak_count,
                                harm_freq, harm_amp, fit_beta);
 
-    /* 8. 8 帧环形缓冲 + 突变检测（和一二题策略一致） */
+    /* 8. 单帧结果输出（已移除 8 帧环形缓冲平均和突变检测）。
+     *    原突变检测在信号变化小时不触发，导致历史帧污染下一次测量。
+     *    现改为：GSignalU_Request 每次采集前清空缓冲，此处只用当前帧，
+     *    确保每次测量独立，等同断电后上电状态。 */
     {
         float new_upp = (fit_upp_mV > 0.0f) ? fit_upp_mV :
                         (maximum - minimum) * 1000.0f;
@@ -531,35 +544,11 @@ static void analyse_frame_u(void)
         }
         float new_freq = fundamental.frequency_hz;
 
-        if (s_avg_filled_u > 0U) {
-            float hist_upp_avg = 0.0f;
-            float hist_freq_avg = 0.0f;
-            uint8_t signal_changed = 0U;
-            for (i = 0U; i < s_avg_filled_u; ++i) {
-                hist_upp_avg += s_upp_history_u[i];
-                hist_freq_avg += s_freq_history_u[i];
-            }
-            hist_upp_avg /= (float)s_avg_filled_u;
-            hist_freq_avg /= (float)s_avg_filled_u;
-            if (hist_upp_avg > 1.0f &&
-                fabsf(new_upp - hist_upp_avg) > 0.25f * hist_upp_avg) {
-                signal_changed = 1U;
-            }
-            if (hist_freq_avg > 100.0f &&
-                fabsf(new_freq - hist_freq_avg) > 0.10f * hist_freq_avg) {
-                signal_changed = 1U;
-            }
-            if (signal_changed) {
-                s_avg_index_u = 0U;
-                s_avg_filled_u = 0U;
-            }
-        }
-
-        s_upp_history_u[s_avg_index_u] = new_upp;
-        s_urms_history_u[s_avg_index_u] = new_urms;
-        s_freq_history_u[s_avg_index_u] = new_freq;
-        s_avg_index_u = (s_avg_index_u + 1U) % AVG_FRAME_COUNT_U;
-        if (s_avg_filled_u < AVG_FRAME_COUNT_U) s_avg_filled_u++;
+        /* 只存当前帧（缓冲已在 GSignalU_Request 清空，s_avg_filled_u=0） */
+        s_upp_history_u[0] = new_upp;
+        s_urms_history_u[0] = new_urms;
+        s_freq_history_u[0] = new_freq;
+        s_avg_filled_u = 1U;
     }
 
     upp_avg = 0.0f; urms_avg = 0.0f; freq_avg = 0.0f;
@@ -628,6 +617,10 @@ void GSignalU_Request(ui_requirement_t requirement, ui_view_t view)
     s_requirement_u = requirement;
     s_view_u = view;
     s_frame_ready_u = 0U; s_dma_fault_u = 0U; s_busy_u = 1U;
+    /* 每次采集前清空环形缓冲，确保本次测量不受历史帧影响，
+     * 等同断电后上电状态。用户切换页面或模式后旧数据不再残留。 */
+    s_avg_index_u = 0U;
+    s_avg_filled_u = 0U;
 
     /* 诊断：通知 PC 收到 U 模式采集请求 */
     {

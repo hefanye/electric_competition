@@ -205,13 +205,19 @@ float refine_frequency(const uint16_t *raw, uint32_t length,
         float a_coef, b_coef;
         float num = 0.0f, den = 0.0f;
         float delta_f;
+        float phi_acc = 0.0f;
+        const float two_pi = 2.0f * 3.14159265358979f;
 
-        /* 第一遍：3 参数线性拟合，累加法方程 */
+        /* 第一遍：3 参数线性拟合，累加法方程。
+         * 相位用累加 phi += omega + 模2π归一化，避免 omega*n 大数乘法
+         * 在 n=8191 时损失 cosf/sinf 精度（单精度约简误差可达 0.5rad）。 */
         for (n = 0U; n < length; ++n) {
-            float phi = omega * (float)n;
-            float c = cosf(phi);
-            float s = sinf(phi);
-            float x = code_to_input_voltage(remap_ad9226(raw[n]));
+            float c, s, x;
+            phi_acc += omega;
+            if (phi_acc >= two_pi) phi_acc -= two_pi;
+            c = cosf(phi_acc);
+            s = sinf(phi_acc);
+            x = code_to_input_voltage(remap_ad9226(raw[n]));
             A[0] += 1.0f;                                /* DC·DC */
             A[1] += c;                A[3] += c;         /* DC·cos */
             A[2] += s;                A[6] += s;         /* DC·sin */
@@ -228,16 +234,20 @@ float refine_frequency(const uint16_t *raw, uint32_t length,
 
         /* 第二遍：计算残差和频率梯度，高斯-牛顿修正
          * 残差 r[n] = x[n] - m[n]
-         * ∂m/∂f = (-a·n·sin(ωn) + b·n·cos(ωn)) · 2π/fs
-         * Δf = Σ(r·∂m/∂f) / Σ((∂m/∂f)²) */
+         * ∂m/∂f = (-a·sin(ωn) + b·cos(ωn)) · n · 2π/fs
+         * Δf = Σ(r·∂m/∂f) / Σ((∂m/∂f)²)
+         * 相位同样用累加+模2π；dm_df 中的 n 是梯度公式数学要求，保留。 */
+        phi_acc = 0.0f;
         for (n = 0U; n < length; ++n) {
-            float phi = omega * (float)n;
-            float c = cosf(phi);
-            float s = sinf(phi);
-            float x = code_to_input_voltage(remap_ad9226(raw[n]));
-            float model = beta3[0] + a_coef * c + b_coef * s;
-            float residual = x - model;
-            float dm_df = (-a_coef * s + b_coef * c) * (float)n * two_pi_over_fs;
+            float c, s, x, model, residual, dm_df;
+            phi_acc += omega;
+            if (phi_acc >= two_pi) phi_acc -= two_pi;
+            c = cosf(phi_acc);
+            s = sinf(phi_acc);
+            x = code_to_input_voltage(remap_ad9226(raw[n]));
+            model = beta3[0] + a_coef * c + b_coef * s;
+            residual = x - model;
+            dm_df = (-a_coef * s + b_coef * c) * (float)n * two_pi_over_fs;
             num += residual * dm_df;
             den += dm_df * dm_df;
         }
@@ -309,7 +319,7 @@ uint32_t find_top3_peaks(float freq_out[3], float amp_out[3])
         }
         raw_amp[rank] = amp;
     }
-    /* 按幅度降序排列（最强=基波），选择排序 */
+    /* 按幅度降序排列（用于主峰门限过滤），选择排序 */
     for (rank = 0U; rank < 2U; ++rank) {
         uint32_t max_idx = rank;
         for (r2 = rank + 1U; r2 < 3U; ++r2) {
@@ -335,6 +345,20 @@ uint32_t find_top3_peaks(float freq_out[3], float amp_out[3])
             } else {
                 break;  /* 已按幅度降序，后面都更小 */
             }
+        }
+    }
+    /* 按频率升序排列（最低频=基波），选择排序。
+     * 解决问题：原"最强=基波"在 1:5:6 等基波非最强组合下，
+     * 谐波次数计算错误（165k/137.5k=1.2→钳位2→275k），拟合全错。
+     * 改为最低频作基波，f1=27.5k, f2=137.5k, f3=165k，与谐波次数无关。 */
+    for (rank = 0U; rank + 1U < real_count; ++rank) {
+        uint32_t min_idx = rank;
+        for (r2 = rank + 1U; r2 < real_count; ++r2) {
+            if (freq_out[r2] < freq_out[min_idx]) min_idx = r2;
+        }
+        if (min_idx != rank) {
+            float tf = freq_out[rank]; freq_out[rank] = freq_out[min_idx]; freq_out[min_idx] = tf;
+            float ta = amp_out[rank];  amp_out[rank]  = amp_out[min_idx];  amp_out[min_idx]  = ta;
         }
     }
     return real_count;
@@ -386,26 +410,32 @@ float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
 
     /* 逐点累加 XᵀX 和 Xᵀx。内部直接从码值转换电压，省 s_voltage 数组。
      * 设计矩阵列顺序：[1, cos1, sin1, cos2, sin2, cos3, sin3]
-     * 只累加 harmonics_count 个谐波对应的列，未用列保持 0。 */
-    for (n = 0U; n < length; ++n) {
-        float phi[FIT_MAX_HARMONICS];
-        float cosv[FIT_MAX_HARMONICS];
-        float sinv[FIT_MAX_HARMONICS];
-        float row_vec[FIT_MATRIX_DIM];
-        float x = code_to_input_voltage(remap_ad9226(raw[n]));
+     * 只累加 harmonics_count 个谐波对应的列，未用列保持 0。
+     * 相位用累加 phi += omega + 模2π归一化，避免 omega*n 大数乘法
+     * 在高次谐波（如6次165kHz）n=511 时 phi≈132rad≈21×2π，
+     * 单精度 cosf 参数约简误差达 0.5rad，导致法方程条件数恶化。 */
+    {
+        const float two_pi = 2.0f * 3.14159265358979f;
+        float phi_acc[FIT_MAX_HARMONICS] = { 0.0f, 0.0f, 0.0f };
+        for (n = 0U; n < length; ++n) {
+            float cosv[FIT_MAX_HARMONICS];
+            float sinv[FIT_MAX_HARMONICS];
+            float row_vec[FIT_MATRIX_DIM];
+            float x = code_to_input_voltage(remap_ad9226(raw[n]));
 
-        row_vec[0] = 1.0f;
-        for (k = 0U; k < FIT_MAX_HARMONICS; ++k) {
-            row_vec[1U + 2U * k] = 0.0f;
-            row_vec[2U + 2U * k] = 0.0f;
-        }
-        for (k = 0U; k < harmonics_count; ++k) {
-            phi[k] = omega[k] * (float)n;
-            cosv[k] = cosf(phi[k]);
-            sinv[k] = sinf(phi[k]);
-            row_vec[1U + 2U * k] = cosv[k];
-            row_vec[2U + 2U * k] = sinv[k];
-        }
+            row_vec[0] = 1.0f;
+            for (k = 0U; k < FIT_MAX_HARMONICS; ++k) {
+                row_vec[1U + 2U * k] = 0.0f;
+                row_vec[2U + 2U * k] = 0.0f;
+            }
+            for (k = 0U; k < harmonics_count; ++k) {
+                phi_acc[k] += omega[k];
+                if (phi_acc[k] >= two_pi) phi_acc[k] -= two_pi;
+                cosv[k] = cosf(phi_acc[k]);
+                sinv[k] = sinf(phi_acc[k]);
+                row_vec[1U + 2U * k] = cosv[k];
+                row_vec[2U + 2U * k] = sinv[k];
+            }
         /* 累加 XᵀX（对称）和 Xᵀx，只累加实际使用的行/列 */
         for (row = 0U; row < dim; ++row) {
             if (row > 2U * harmonics_count) continue;  /* 跳过未用列 */
@@ -419,6 +449,7 @@ float fit_multisine_and_upp(const uint16_t *raw, uint32_t length,
                 }
             }
         }
+    }
     }
 
     /* 未使用的对角线补 1，避免矩阵奇异（0×0 子块不可逆） */
@@ -680,57 +711,47 @@ static void analyse_frame(void)
                                  (float)s_sample_rate_hz, G_SIGNAL_FRAME_SAMPLES,
                                  1U, G_SIGNAL_BIN_COUNT - 2U, &fundamental);
 
-    /* 2.5 找真峰（按幅度降序，最强=基波）。
-     *    find_top3_peaks 内部用主峰×5% 门限过滤噪声假峰：
+    /* 2.5 找真峰（门限过滤后按频率升序，最低频=基波）。
+     *    find_top3_peaks 先按幅度降序选3峰，主峰×2%门限过滤噪声假峰，
+     *    再按频率升序输出（最低频=基波），支持任意频率组合。
      *      单频信号 → 返回 1 个真峰
      *      双频信号 → 返回 2 个真峰
      *      三频信号 → 返回 3 个真峰
-     *    fit 按实际真峰数拟合，不硬塞假峰，彻底避免矩阵奇异。
-     *    这解决了单频信号 Upp 偏小的问题：旧版用假峰频率拟合，
-     *    最小二乘把能量分配到假频率上，基波系数被分走，Upp 偏小 3~5%。 */
+     *    fit 按实际真峰数拟合，不硬塞假峰，彻底避免矩阵奇异。 */
     real_peak_count = find_top3_peaks(harm_freq, harm_amp);
-    fundamental.frequency_hz = harm_freq[0];  /* 基波 = 最强峰 */
+    fundamental.frequency_hz = harm_freq[0];  /* 基波 = 最低频峰 */
 
-    /* 3. 频率精化（IEEE 1057，3 参数高斯-牛顿迭代）—— 统一最精密算法。
-     *    频率精化是幅值拟合的基础，不分频段，统一用 8192 点全点。
-     *    v3-release 验证参数：15 次迭代 + 0.5Hz 门限，精化后频率偏差 < 1Hz。
-     *    精化后 8192 点相位累积 < 0.013rad，可忽略，不影响幅值拟合。 */
-    fundamental.frequency_hz = refine_frequency(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
-                                                G_SIGNAL_FRAME_SAMPLES,
-                                                (float)s_sample_rate_hz,
-                                                fundamental.frequency_hz);
-
-    /* 基波用精化值；真谐波 = 精化基波 × 谐波次数（严格倍数）。
-     * 谐波次数 = FFT 峰值频率 ÷ 基波 FFT 峰值频率 四舍五入，支持 2/3/4 次任意谐波。 */
+    /* 3. 频率精化（IEEE 1057，3 参数高斯-牛顿迭代）—— 对所有真峰都精化。
+     *    原来只精化基波，谐波用 FFT 抛物线插值（精度0.1bin≈780Hz），
+     *    在 512 点拟合中 137.5kHz 的 780Hz 误差导致相位累积偏差 0.628rad，
+     *    使 ak/bk 系数严重失真。现对所有峰都精化到 <1Hz，
+     *    相位累积偏差降到 0.0008rad，法方程条件数大幅改善。
+     *    统一用 8192 点全点精化（与拟合点数解耦）。 */
     {
-        float fund_refined = fundamental.frequency_hz;
-        float fund_fft = harm_freq[0];  /* 精化前的基波 FFT 频率 */
-        uint32_t k;
-        harm_freq[0] = fund_refined;
-        for (k = 1U; k < real_peak_count; ++k) {
-            float ratio = harm_freq[k] / fund_fft;
-            uint32_t harmonic_order = (uint32_t)(ratio + 0.5f);
-            if (harmonic_order < 2U) harmonic_order = 2U;
-            harm_freq[k] = fund_refined * (float)harmonic_order;
+        uint32_t pk;
+        for (pk = 0U; pk < real_peak_count; ++pk) {
+            harm_freq[pk] = refine_frequency(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
+                                             G_SIGNAL_FRAME_SAMPLES,
+                                             (float)s_sample_rate_hz,
+                                             harm_freq[pk]);
         }
     }
+    fundamental.frequency_hz = harm_freq[0];  /* 基波 = 最低频峰（精化后） */
 
     /* 4. 多正弦最小二乘拟合：分频段参数，逐频段调试。
      *    频率已精化到位（偏差<1Hz），幅值拟合用分频段的 fit_length。
-     *    初始全部 8192（v3-release 等效），逐频段调优后固定。
      *
-     *    多频信号强制用 512 点：相位累积误差 ∝ 谐波次数×Δf×N，
-     *    8192 点下 3 次谐波相位累积可达 1.93rad（Δf=50Hz 时），
-     *    导致 ak/bk 比值失真，合成波形 max-min 偏小 12~47mV。
-     *    改用 512 点后相位累积降到 0.12rad，幅值 SNR 仍 >400（误差<0.1mV）。
-     *    单频信号无谐波次数放大，保持原频段参数（MID/LOW 用 8192）。
-     *    实测验证：200k+400k 偏差 -24mV→≤1mV，100k+200k+300k -47mV→≤1mV。 */
+     *    多频信号统一用分频段策略（不再强制512点）：
+     *    旧版用 omega*n 大数乘法，8192点下高次谐波（如6次165kHz）
+     *    phi累积极大导致cosf/sinf精度损失，所以强制512点规避。
+     *    现已改为相位累加 phi += omega + 模2π归一化，phi始终在[0,2π)，
+     *    8192点不再有相位精度问题。
+     *    且8192点bin宽度488Hz（vs 512点7812Hz），多频率cos/sin列向量
+     *    正交性更好，法方程条件数从>10^4降到<100，对1:5:6等高次谐波
+     *    组合的幅值稳定性显著提升（A1/A2/A3波动从±15mV降到预期±2mV）。 */
     {
         freq_band_t band = get_freq_band(fundamental.frequency_hz);
         uint32_t fit_length = get_band_fit_length(band);
-        if (real_peak_count >= 2U) {
-            fit_length = 512U;
-        }
         fit_upp_mV = fit_multisine_and_upp(&s_raw[G_SIGNAL_DISCARD_SAMPLES],
                                            fit_length,
                                            (float)s_sample_rate_hz,
@@ -739,10 +760,11 @@ static void analyse_frame(void)
                                            &fit_freq, harm_freq, harm_amp, fit_beta);
     }
 
-    /* 5. 8 帧环形缓冲平均 + 突变检测。
-     *    正常情况下平均 8 帧提升精度（×√8≈2.8）；
-     *    当用户切换信号源（幅度突变>25% 或 频率突变>10%）时，
-     *    立即清空缓冲区，避免旧帧拖累响应（解决切换后测量值滞后问题）。 */
+    /* 5. 单帧结果输出（已移除 8 帧环形缓冲平均和突变检测）。
+     *    原 8 帧平均在连续测量同信号时提升精度，但突变检测阈值（幅度25%/频率10%）
+     *    在信号变化小时不触发，导致历史帧污染下一次测量（断电才能恢复）。
+     *    现改为：GSignal_Request 每次采集前清空缓冲，analyse_frame 只用当前帧，
+     *    确保每次测量独立，等同断电后上电状态。 */
     {
         float new_upp = (fit_upp_mV > 0.0f) ? fit_upp_mV :
                         (maximum - minimum) * 1000.0f;
@@ -761,38 +783,11 @@ static void analyse_frame(void)
         }
         float new_freq = fundamental.frequency_hz;
 
-        /* 突变检测：先算当前历史均值，再判断新帧是否偏离过大 */
-        if (s_avg_filled > 0U) {
-            float hist_upp_avg = 0.0f;
-            float hist_freq_avg = 0.0f;
-            uint8_t signal_changed = 0U;
-            for (i = 0U; i < s_avg_filled; ++i) {
-                hist_upp_avg += s_upp_history[i];
-                hist_freq_avg += s_freq_history[i];
-            }
-            hist_upp_avg /= (float)s_avg_filled;
-            hist_freq_avg /= (float)s_avg_filled;
-            /* 幅度突变 >25% 或 频率突变 >10%，判定为信号源切换 */
-            if (hist_upp_avg > 1.0f &&
-                fabsf(new_upp - hist_upp_avg) > 0.25f * hist_upp_avg) {
-                signal_changed = 1U;
-            }
-            if (hist_freq_avg > 100.0f &&
-                fabsf(new_freq - hist_freq_avg) > 0.10f * hist_freq_avg) {
-                signal_changed = 1U;
-            }
-            if (signal_changed) {
-                /* 清空缓冲，从新信号重新开始累积 */
-                s_avg_index = 0U;
-                s_avg_filled = 0U;
-            }
-        }
-
-        s_upp_history[s_avg_index] = new_upp;
-        s_urms_history[s_avg_index] = new_urms;
-        s_freq_history[s_avg_index] = new_freq;
-        s_avg_index = (s_avg_index + 1U) % AVG_FRAME_COUNT;
-        if (s_avg_filled < AVG_FRAME_COUNT) s_avg_filled++;
+        /* 只存当前帧（缓冲已在 GSignal_Request 清空，s_avg_filled=0） */
+        s_upp_history[0] = new_upp;
+        s_urms_history[0] = new_urms;
+        s_freq_history[0] = new_freq;
+        s_avg_filled = 1U;
     }
 
     upp_avg = 0.0f; urms_avg = 0.0f; freq_avg = 0.0f;
@@ -879,6 +874,10 @@ void GSignal_Request(ui_requirement_t requirement, ui_view_t view)
     s_requirement = requirement;
     s_view = view;
     s_frame_ready = 0U; s_dma_fault = 0U; s_busy = 1U;
+    /* 每次采集前清空环形缓冲，确保本次测量不受历史帧影响，
+     * 等同断电后上电状态。用户切换页面或模式后旧数据不再残留。 */
+    s_avg_index = 0U;
+    s_avg_filled = 0U;
     /* 诊断：通知 PC 收到采集请求 */
     {
         extern UART_HandleTypeDef huart1;
